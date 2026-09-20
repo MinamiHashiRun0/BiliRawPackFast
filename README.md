@@ -21,13 +21,16 @@
 | ④ CI 编译 + 发布 | ✅ 完成 | run 35523168173 全绿，release `probe-4` |
 | ⑤ 产物独立复核 | ✅ 完成 | `_recon/verify_dylib.py` 全项通过 |
 | ⑥ **真机验证注入是否加载** | ⏳ **等用户执行** | 见下方「真机步骤」 |
-| ⑦ CDN 重定向 | ⏳ 未开始 | |
-| ⑧ 并发分段下载 | ⏳ 未开始 | |
+| ⑦ CDN 重定向 | ⏳ 未开始 | 已定位 hook 点与候选配置键 |
+| ⑧ 并发分段下载 | 🔶 算法已验证，待移植 | `_recon/segment_fetcher_ref.py` 4/4 通过 |
 
 ### 已交付产物
 
-`BiliProbe.dylib`，114,688 字节，SHA256
-`16A64214F6130A82F0387717930079CD31693C28B10BA98F3B61E7B9B8ED747F`
+`BiliProbe.dylib`（**v2**，真·只读版），114,688 字节
+SHA256 `0E28FF6F8CC37F1D0A48796700841F016A6AF3418CB546941282C09E8503182D`
+
+> v1 曾让 `shouldWaitForLoading` 恒返回 NO（行为改动），已废弃并从交付目录移除。
+> 只装 v2。
 
 ```
 Mach-O 64-bit dynamically linked shared library arm64
@@ -37,6 +40,27 @@ install name : @executable_path/Frameworks/BiliProbe.dylib
                —— 6 个全部系统库，零第三方依赖
 签名         : ad-hoc
 ```
+
+### 阶段 2 的线索：PCDN 可能是「配置开关」而非硬编码
+
+在二进制里发现成组的 P2P/MCDN 偏好键，其中几个直接决定 PCDN 是否启用：
+
+| 键 | 推断含义 |
+|---|---|
+| `p2p_pcdn_download_enable` | PCDN 下载总开关 |
+| `p2p_v3_policy_enable` | P2P v3 策略总开关 |
+| `p2p_is_open` / `isEnableP2P:` / `isSupportP2P` | 启用判定入口 |
+| `isPCDNBlackList` / `setIsPCDNBlackList:` | PCDN 黑名单 |
+| `ijkplayer.p2p-disable-whitelist` | IJK 层 P2P 禁用白名单 |
+| `ijkplayer.p2p_download` / `ijkplayer.p2p_upload` | IJK 层下载/上传开关 |
+| `p2p_close_stun_reflex_ports` / `p2p_local_connect_enable` | NAT/UDP 相关 |
+
+**这意味着阶段 2 可能有一条成本远低于 hook 的路径**：直接改写偏好值即可关掉 PCDN，
+不必替换 delegate、也不碰播放逻辑。探针日志出来后可以两种做法对照：
+若偏好开关生效，就用配置；不生效再退回 delegate 替换。
+
+待探针确认的具体问题：偏好写在哪（NSUserDefaults / 自定义 plist / 服务端下发配置），
+以及 App 是否在启动时用服务端配置覆盖本地值。
 
 ### 真机步骤
 
@@ -175,7 +199,13 @@ Actions → `Build BiliProbe` → Run workflow。
 - 探针仍会把 4 个 delegate 方法的实现换成路由器，并多打一行日志。
   日志走异步队列、不阻塞调用方；且 `shouldWaitForLoading` 由 AVFoundation
   控制调用频率（非每帧），因此不应引入可观测卡顿 —— 但这一点**尚未真机验证**。
+- **注入可行性本身完全未验证。** 迄今所有结论都在二进制层（Mach-O 结构、依赖、
+  签名、字符串）与算法层（Python 参考实现），**没有一次真机运行**。
+  App 会不会被自身完整性检查干掉、dylib 能否被加载，只有装上才知道。
+- 注入版 IPA 那条路（workflow 的 `--ipa` 分支）**从未真正执行过** ——
+  今天没有可用的 IPA 直链，该步骤被跳过。
 - 脱壳包不含 `embedded.mobileprovision`，无法还原原始 entitlements；
   自签用最小集合，全能签签名时会替换成你证书对应值。
   workflow 会先尝试用 `codesign -d --entitlements :-` 从原签名里抽原始值。
-- 尚未实现任何 CDN/并发功能。
+- 并发分段下载只有 **Python 参考实现**，Objective-C 版尚未编写；
+  CDN 重定向完全未开始。
