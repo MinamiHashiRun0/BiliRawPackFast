@@ -10,6 +10,15 @@
 ARCHS = arm64
 TARGET = iphone:clang:latest:14.0
 
+# 显式指定 ad-hoc 签名，不吃 Theos 的默认值。
+# 原因：Darwin 上 Theos 默认 TARGET_CODESIGN ?= ldid（flags -S），
+# runner 上没有 ldid 时会以裸命令名调用 → Error 127，
+# 且报错点出现在 "Generating debug symbols" 之后，很容易误判。
+# macOS 自带 codesign，ad-hoc（--sign -）对「后续还要整包重签」的 dylib 完全够用。
+# 用 override 是为了让命令行传参也无法覆盖，保证 CI 与本机行为一致。
+override TARGET_CODESIGN = codesign
+override TARGET_CODESIGN_FLAGS = --force --sign -
+
 include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = BiliProbe

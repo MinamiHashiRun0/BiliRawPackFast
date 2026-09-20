@@ -42,7 +42,7 @@ jobs:
           set -euxo pipefail
           export THEOS="$RUNNER_TEMP/theos"
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-          mkdir -p "$THEOS/sdks"
+          mkdir -p "$THEOS/sdks" "$THEOS/bin"
           if curl -fsSL --retry 2 -o "$RUNNER_TEMP/sdk.tar.xz" \
                https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz; then
             tar -xJf "$RUNNER_TEMP/sdk.tar.xz" -C "$THEOS/sdks"
@@ -55,6 +55,32 @@ jobs:
           fi
           ls -la "$THEOS/sdks/"
 
+          # ldid：Theos 在 Darwin 上默认用 `ldid -S` 做 ad-hoc 签名
+          # （makefiles/targets/_common/darwin_head.mk: TARGET_CODESIGN ?= ldid）。
+          # runner 上两者都没有 → 直接以命令名调用 → 报 Error 127
+          # （表现为 "Generating debug symbols" 之后突然失败，极易误判成 dsymutil 的问题）。
+          # 放到 $THEOS/bin 即进 PATH，Theos 的 `__executable(ldid)` 检查会命中它。
+          if ! command -v ldid >/dev/null 2>&1; then
+            for url in \
+              "https://github.com/theos/ldid/releases/latest/download/ldid_macosx_arm64" \
+              "https://github.com/theos/ldid/releases/latest/download/ldid_macosx_x86_64" \
+              "https://cdn.jsdelivr.net/gh/xerub/ldid@master/ldid"
+            do
+              echo "尝试获取 ldid: $url"
+              if curl -fsSL --retry 2 -o "$THEOS/bin/ldid" "$url"; then
+                chmod +x "$THEOS/bin/ldid"
+                if "$THEOS/bin/ldid" -h >/dev/null 2>&1 || "$THEOS/bin/ldid" 2>&1 | head -1; then
+                  echo "ldid 可用: $("$THEOS/bin/ldid" -h 2>&1 | head -1)"
+                  break
+                fi
+              fi
+              rm -f "$THEOS/bin/ldid"
+            done
+          fi
+          export PATH="$THEOS/bin:$PATH"
+          echo "--- 签名工具自检 ---"
+          command -v ldid && ldid -h 2>&1 | head -2 || echo "!! 没有 ldid，将于构建时显式指定 codesign"
+
       - name: Build BiliProbe.dylib
         run: |
           set -euxo pipefail
@@ -65,7 +91,6 @@ jobs:
           make ARCHS=arm64
           echo "--- 产物 ---"
           find . -name '*.dylib' -exec ls -la {} \;
-
       - name: Verify dylib
         run: |
           set -euxo pipefail
