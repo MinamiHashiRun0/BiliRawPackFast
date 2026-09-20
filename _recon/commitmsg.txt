@@ -1,31 +1,34 @@
-refactor(probe): 探针 v2 —— 消除唯一的行为改动，改为真·只读
+fix(probe): ARC / ObjC 两处硬错误 + 新增本地静态闸门
 
-问题（上一版自己承认的限制）：
-  shouldWaitForLoadingOfRequestedResource 恒返回 NO，属行为改动，
-  会把真机结论限定在「注入是否可行」，无法回答「注入后是否依然流畅」。
+CI 报错：
+  BiliProbe.m:194:10 error: bad receiver type 'SEL'
+  BiliProbe.m:195:16 error: cast of 'long long' to 'id' is disallowed with ARC
+  （同一模式重复 4 组）
 
-根因不是「必须如此」，而是上一版没有保存原 IMP：
-  交换实现后原实现被挪走，probe 方法里既不能回调 _cmd（无限递归），
-  也拿不到原返回值，只能返回常量。
+根因：
+  ① [_cmd isEqual:NSSelectorFromString(...)]
+     SEL 不是 Objective-C 对象，对它发消息非法 —— 应用 sel_isEqual()。
+     同时把它改成 dispatch_once 静态注册，避免热路径反复构造选择子。
+  ② ProbeRecycledCall 返回 id，而返回值来自 BOOL 方法，写了
+     (id)(long long)... 强转 —— ARC 下禁止整数与对象指针互转。
+     被挂的四个方法返回 BOOL 或 void，不是对象指针；
+     intptr_t 与 BOOL 在 arm64 上同在 x0 返回，ABI 一致，改用它。
+     路由器返回类型随之从 id 改为 intptr_t（前置声明一并改）。
 
-修复：原 IMP 查表 + 回收站方案
-  ProbeInstallOne:
-    1. 从 class_copyMethodList 取「本类自己的」原 IMP（避免误抓父类实现串味）
-    2. 原实现搬进 biliprobe_recycle_<选择子> 回收站方法
-    3. 真实选择子指向 ProbeRecycledCall 路由器
-    4. 表里登记「观测方法」的 IMP（不是原 IMP —— 否则路由器转发时会绕过观测方法）
-  ProbeRecycledCall: 按 _cmd 分派到四个观测方法
-  ProbeForwardToOriginal: 查回原实现并调用，返回其真实返回值
+新增本地静态闸门（_recon/check_objc.py 第 6 组规则），把这两类
+「只有 CI 才会暴露」的写法在本地先抓掉：
+  6a 对 SEL 发消息
+  6b ARC 下整数转 id
+  6c 路由器返回类型必须是整数型
 
-  于是：返回值 === 原实现的返回值 ⇒ 探针零行为改动。
-
-顺带修掉的问题：
-  * 删掉三个死代码 helper（ProbeSwizzle / ProbeSwizzleOwnMethod /
-    ProbeAddMethodIfAbsent）—— 它们属「分类 + probe_ 选择子」旧写法，
-    新方案落地后已无调用点。留死代码会让人以为存在两条 hook 路径。
-  * 新增前置声明区，消除 static 函数顺序依赖
-  * 新增 _recon/check_objc.py 静态自检：括号平衡、残留引用（排除注释）、
-    先声明后使用、@end 配对、观测方法是否真的转发了原实现
-
-验证：check_objc.py 全项通过；preflight.py 全项通过。
-真机尚未验证（等用户回传 biliprobe 日志）。
+另外：本轮把并发分段引擎的**同构参考实现 + 本地验证台**写好并跑通
+（_recon/segment_fetcher_ref.py）。它是纯 Python + 限速 Range 服务器，
+在 Windows 上就能定量验证引擎语义，不需要 Mac：
+  测试1 乱序到达/40 段按序交付、逐段逐字节正确      ✔
+  测试2 并发提速：并发1 16.80s / 并发8 2.10s
+        实测 8.02×，理论 8.00×（单连接限速 256KB/s）  ✔
+  测试3 坏 host 自动重试并降级到备用 host，6/6 完整交付  ✔
+  测试4 全部 host 失效时显式报错且不交付任何残片        ✔
+这为阶段 3「并发分段」提供了可复用的算法基线：ObjC 版将按同一状态机
+（段表驱动 / 固定并发 / 乱序入槽 / 严格按段号交付 / 失败重试与换 host）
+实现，届时只需验证实现与基线的行为一致。

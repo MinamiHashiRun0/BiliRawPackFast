@@ -158,8 +158,9 @@ static IMP         ProbeFetchOriginal(Class cls, SEL sel);
 /// 探针「零行为改动」就靠这个函数 —— 调用方拿到的就是 App 原本会拿到的结果。
 static BOOL        ProbeForwardToOriginal(id self, SEL cmd, id a1, id a2);
 
-/// 被挂的 delegate 方法实现（路由器）
-static id          ProbeRecycledCall(id self, SEL _cmd, id a1, id a2);
+/// 被挂的 delegate 方法实现（路由器）。返回类型必须是 intptr_t 而非 id：
+/// 被挂方法返回 BOOL/void，用 id 会被 ARC 拒绝（见定义处注释）。
+static intptr_t    ProbeRecycledCall(id self, SEL _cmd, id a1, id a2);
 
 static void        ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue);
 static BOOL        ProbeShouldWaitForLoading(id self, SEL _cmd, id loader, id request);
@@ -188,24 +189,40 @@ static BOOL ProbeForwardToOriginal(id self, SEL cmd, id a1, id a2) {
 }
 
 /// 路由器：按 _cmd 分派到对应观测方法；观测方法内部再转发原实现。
-/// 注意 _cmd 始终是「真实选择子」—— 只有走真实的 delegate 入口才会到这里，
-/// 若从回收站选择子进入则是原实现本身，不经过本函数，因此不会重复计数/递归。
-static id ProbeRecycledCall(id self, SEL _cmd, id a1, id a2) {
-    if ([_cmd isEqual:NSSelectorFromString(@"resourceLoader:shouldWaitForLoadingOfRequestedResource:")]) {
-        return (id)(long long)ProbeShouldWaitForLoading(self, _cmd, a1, a2);
+///
+/// 两个必须注意的 ABI / 语言细节（都是 CI 上才会暴露的坑）：
+///  ① 返回类型用 intptr_t 而不是 id。
+///     被挂的四个方法返回 BOOL 或 void，不是对象指针；返回 id 会触发
+///     「cast of 'long long' to 'id' is disallowed with ARC」。
+///     intptr_t 与 BOOL 在 arm64 上同在 x0 返回，ABI 一致。
+///  ② 比较选择子必须用 sel_isEqual()，不能用 [_cmd isEqual:]
+///     —— SEL 不是 Objective-C 对象，发消息会报 bad receiver type 'SEL'。
+///     选择子比较每次只做一次静态注册，避免热路径上反复调用 sel_isEqual。
+static intptr_t ProbeRecycledCall(id self, SEL _cmd, id a1, id a2) {
+    static SEL sWait, sRenew, sAuth, sCancel;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sWait   = NSSelectorFromString(@"resourceLoader:shouldWaitForLoadingOfRequestedResource:");
+        sRenew  = NSSelectorFromString(@"resourceLoader:shouldWaitForRenewalOfRequestedResource:");
+        sAuth   = NSSelectorFromString(@"resourceLoader:shouldWaitForResponseToAuthenticationChallenge:");
+        sCancel = NSSelectorFromString(@"resourceLoader:didCancelLoadingRequest:");
+    });
+
+    if (sel_isEqual(_cmd, sWait)) {
+        return (intptr_t)ProbeShouldWaitForLoading(self, _cmd, a1, a2);
     }
-    if ([_cmd isEqual:NSSelectorFromString(@"resourceLoader:shouldWaitForRenewalOfRequestedResource:")]) {
-        return (id)(long long)ProbeShouldWaitForRenewal(self, _cmd, a1, a2);
+    if (sel_isEqual(_cmd, sRenew)) {
+        return (intptr_t)ProbeShouldWaitForRenewal(self, _cmd, a1, a2);
     }
-    if ([_cmd isEqual:NSSelectorFromString(@"resourceLoader:shouldWaitForResponseToAuthenticationChallenge:")]) {
-        return (id)(long long)ProbeAuthChallenge(self, _cmd, a1, a2);
+    if (sel_isEqual(_cmd, sAuth)) {
+        return (intptr_t)ProbeAuthChallenge(self, _cmd, a1, a2);
     }
-    if ([_cmd isEqual:NSSelectorFromString(@"resourceLoader:didCancelLoadingRequest:")]) {
-        (void)ProbeDidCancelLoading(self, _cmd, a1, a2);
-        return (id)0;
+    if (sel_isEqual(_cmd, sCancel)) {
+        ProbeDidCancelLoading(self, _cmd, a1, a2);
+        return 0;
     }
     // 未登记的方法：直接转发，绝不影响行为
-    return (id)(long long)ProbeForwardToOriginal(self, _cmd, a1, a2);
+    return (intptr_t)ProbeForwardToOriginal(self, _cmd, a1, a2);
 }
 
 //=== 1. AVAssetResourceLoader 的 delegate 是指谁 ==============================

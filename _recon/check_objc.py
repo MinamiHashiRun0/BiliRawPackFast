@@ -104,6 +104,27 @@ for fn in ("ProbeShouldWaitForLoading", "ProbeShouldWaitForRenewal", "ProbeAuthC
 if "ProbeForwardToOriginal" not in src:
     problems.append("找不到 ProbeForwardToOriginal")
 
+# 6. 已知会在 CI 上炸的 ARC / ObjC 写法（本地先抓掉）
+#   6a. SEL 不是对象，不能发消息
+for i, l in enumerate(code_lines):
+    if re.search(r'\[\s*_cmd\s+', l) or re.search(r'\[\s*\w*[Ss]elector\w*\s+isEqual', l):
+        problems.append(f"行{i+1}: 对 SEL 发消息（SEL 不是 ObjC 对象，应用 sel_isEqual）: {l.strip()[:70]}")
+#   6b. ARC 下禁止整数↔对象指针互转
+for i, l in enumerate(code_lines):
+    if re.search(r'\(id\)\s*\(\s*(long long|intptr_t|uintptr_t|NSInteger)\s*\)', l) or \
+       re.search(r'\(id\)\s*(0|1)\b', l):
+        problems.append(f"行{i+1}: ARC 下把整数转成 id（不允许）: {l.strip()[:70]}")
+#   6c. 路由器返回类型必须是整数型，不能是 id
+m = re.search(r'static\s+(\w+)\s+ProbeRecycledCall\s*\(', src)
+if m:
+    rt = m.group(1)
+    if rt == "id":
+        problems.append("ProbeRecycledCall 返回 id：被挂方法返回 BOOL/void，ARC 会拒绝，应用 intptr_t")
+    else:
+        print(f"  路由器返回类型 ✓ ({rt})")
+else:
+    problems.append("找不到 ProbeRecycledCall 定义")
+
 print()
 if problems:
     print("发现问题：")
