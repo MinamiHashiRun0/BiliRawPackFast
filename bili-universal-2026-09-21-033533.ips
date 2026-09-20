@@ -1,0 +1,198 @@
+{"app_name":"bili-universal","timestamp":"2026-09-21 03:35:33.00 +0800","app_version":"9.12.0","slice_uuid":"fd1e02b1-d7d9-31d5-bb41-0acb58b3dff8","build_version":"91200100","platform":2,"bundleID":"tv.danmaku.bilianime1","share_with_app_devs":0,"is_first_party":0,"bug_type":"309","os_version":"iPhone OS 27.0 (24A5390f)","roots_installed":0,"name":"bili-universal","incident_id":"B952F620-0DA2-46CE-AB12-720BD8F363CE"}
+{
+  "uptime" : 150000,
+  "procRole" : "Foreground",
+  "version" : 2,
+  "userID" : 501,
+  "deployVersion" : 210,
+  "modelCode" : "iPhone16,2",
+  "coalitionID" : 3918,
+  "osVersion" : {
+    "isEmbedded" : true,
+    "train" : "iPhone OS 27.0",
+    "releaseType" : "Beta",
+    "build" : "24A5390f"
+  },
+  "captureTime" : "2026-09-21 03:35:29.0932 +0800",
+  "codeSigningMonitor" : 2,
+  "incident" : "B952F620-0DA2-46CE-AB12-720BD8F363CE",
+  "pid" : 11817,
+  "translated" : false,
+  "cpuType" : "ARM-64",
+  "procLaunch" : "2026-09-21 03:35:28.8045 +0800",
+  "procStartAbsTime" : 3781660708895,
+  "procExitAbsTime" : 3781667007027,
+  "procName" : "bili-universal",
+  "procPath" : "\/private\/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/bili-universal",
+  "bundleInfo" : {"CFBundleShortVersionString":"9.12.0","CFBundleVersion":"91200100","CFBundleIdentifier":"tv.danmaku.bilianime1","DTAppStoreToolsBuild":"27A261"},
+  "storeInfo" : {"deviceIdentifierForVendor":"1B9C4CF6-D79F-4F46-AC0F-FED0DF95B07C","thirdParty":true},
+  "parentProc" : "launchd",
+  "parentPid" : 1,
+  "coalitionName" : "tv.danmaku.bilianime1",
+  "crashReporterKey" : "08ed1e355d6a3d722cd1974ad6ee9c0284bba242",
+  "chargingStatus" : {"externalSourceConnected":true,"chargeMode":"chargingWireless"},
+  "developerMode" : 1,
+  "bootProgressRegister" : "0x2080000c",
+  "wasUnlockedSinceBoot" : 1,
+  "isLocked" : 0,
+  "codeSigningID" : "tv.danmaku.bilianime1",
+  "codeSigningTeamID" : "4868K5P59Q",
+  "codeSigningFlags" : 570434305,
+  "codeSigningValidationCategory" : 5,
+  "codeSigningTrustLevel" : 4,
+  "codeSigningAuxiliaryInfo" : 9007199254740992,
+  "instructionByteStream" : {"beforePC":"UQAINjnyABQBpzrQIcAXkbHM9BXtBQAUijIAFMADX9YAAADqzf\/\/VA==","atPC":"EABA+RGefZIxEkD5Ef4XNvD+BzYR\/nfT8f7\/tBEg4NIRAhGrYv7\/VA=="},
+  "bootSessionUUID" : "18BA9E9F-215C-4B84-A34F-51C336881694",
+  "basebandVersion" : "4.02.01",
+  "vmRegionInfo" : "0xffffffff is not in any region.  Bytes before following region: 8667137\n      REGION TYPE                   START - END        [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      __TEXT                     100844000-11dff8000   [471.7M] r-x\/r-x SM=COW  \/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/bili-universal",
+  "exception" : {"codes":"0x0000000000000001, 0x00000000ffffffff","rawCodes":[1,4294967295],"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x00000000ffffffff"},
+  "termination" : {"flags":0,"code":11,"namespace":"SIGNAL","indicator":"Segmentation fault: 11","byProc":"exc handler","byPid":11817},
+  "vmregioninfo" : "0xffffffff is not in any region.  Bytes before following region: 8667137\n      REGION TYPE                   START - END        [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      __TEXT                     100844000-11dff8000   [471.7M] r-x\/r-x SM=COW  \/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/bili-universal",
+  "faultingThread" : 0,
+  "threads" : [{"triggered":true,"id":2628199,"threadState":{"x":[{"value":4294967295},{"value":0},{"value":4781064210},{"value":255},{"value":4781064211},{"value":6163206129},{"value":116},{"value":18446744072367376383},{"value":8458004832,"symbolLocation":224,"symbol":"_main_thread"},{"value":4781064210},{"value":4583810986},{"value":1},{"value":0},{"value":5066956432},{"value":4895652120},{"value":4895652120},{"value":14634021068},{"value":4680510528},{"value":0},{"value":4961936632,"symbolLocation":0,"symbol":"BiliProbeInit"},{"value":4961936632,"symbolLocation":0,"symbol":"BiliProbeInit"},{"value":6163208984},{"value":4961895464},{"value":4961894744},{"value":6163208168},{"value":6163208560},{"value":6163208152},{"value":0},{"value":8454347912,"symbolLocation":23256,"symbol":"lsl::sPoolBytes"}],"flavor":"ARM_THREAD_STATE64","lr":{"value":4961914948},"cpsr":{"value":4096},"fp":{"value":6163207728},"sp":{"value":6163207184},"esr":{"value":2449473542,"description":"(Data Abort) byte read Translation fault"},"pc":{"value":6737564276,"matchesCrashFrame":1},"far":{"value":4294967295}},"queue":"com.apple.main-thread","frames":[{"imageOffset":4724,"symbol":"objc_retain","symbolLocation":8,"imageIndex":3},{"imageOffset":20548,"symbol":"+[BiliProbe bootstrap]","symbolLocation":2400,"imageIndex":2},{"imageOffset":42680,"symbol":"BiliProbeInit","symbolLocation":448,"imageIndex":2},{"imageOffset":24416,"symbol":"dyld4::LibSystemHelpers::callInitializer(int, char const* const*, char const* const*, char const* const*, dyld4::ProgramVars const*, void (*)(int, char const* const*, char const* const*, char const* const*, dyld4::ProgramVars const*)) const","symbolLocation":40,"imageIndex":4},{"imageOffset":197548,"symbol":"invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const","symbolLocation":300,"imageIndex":5},{"imageOffset":204724,"symbol":"invocation function for block in mach_o::Image::forEachInitializer(void (unsigned int) block_pointer) const","symbolLocation":100,"imageIndex":5},{"imageOffset":24912,"symbol":"mach_o::Header::SegmentInfo mach_o::Header::parse_segment_command<true>(mach_o::Header::LoadCommandInfo const&, unsigned short, void (mach_o::Header::SegmentInfo const&, mach_o::Header::SectionInfo const&) block_pointer, mach_o::Error*) const","symbolLocation":408,"imageIndex":5},{"imageOffset":37372,"symbol":"invocation function for block in mach_o::Header::forEachSection(void (mach_o::Header::SectionInfo const&, bool&) block_pointer) const","symbolLocation":172,"imageIndex":5},{"imageOffset":37792,"symbol":"mach_o::Header::forEachSection(void (mach_o::Header::SectionInfo const&, bool&) block_pointer) const","symbolLocation":284,"imageIndex":5},{"imageOffset":204188,"symbol":"mach_o::Image::forEachInitializer(void (unsigned int) block_pointer) const","symbolLocation":244,"imageIndex":5},{"imageOffset":321404,"symbol":"dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const","symbolLocation":116,"imageIndex":5},{"imageOffset":642612,"symbol":"dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const (.cold.3)","symbolLocation":80,"imageIndex":5},{"imageOffset":203864,"symbol":"dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const","symbolLocation":652,"imageIndex":5},{"imageOffset":196008,"symbol":"dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const","symbolLocation":96,"imageIndex":5},{"imageOffset":203020,"symbol":"dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, lsl::Vector<AuthenticatedValue<dyld4::Loader const*>>&, lsl::Vector<AuthenticatedValue<dyld4::Loader const*>>&) const","symbolLocation":660,"imageIndex":5},{"imageOffset":202968,"symbol":"dyld4::Loader::runInitializersBottomUp(dyld4::RuntimeState&, lsl::Vector<AuthenticatedValue<dyld4::Loader const*>>&, lsl::Vector<AuthenticatedValue<dyld4::Loader const*>>&) const","symbolLocation":608,"imageIndex":5},{"imageOffset":198208,"symbol":"dyld4::Loader::runInitializersBottomUpPlusUpwardLinks(dyld4::RuntimeState&) const::$_0::operator()() const","symbolLocation":124,"imageIndex":5},{"imageOffset":319584,"symbol":"dyld4::Loader::runInitializersBottomUpPlusUpwardLinks(dyld4::RuntimeState&) const (.cold.3)","symbolLocation":412,"imageIndex":5},{"imageOffset":198020,"symbol":"dyld4::Loader::runInitializersBottomUpPlusUpwardLinks(dyld4::RuntimeState&) const","symbolLocation":384,"imageIndex":5},{"imageOffset":69740,"symbol":"dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)","symbolLocation":4604,"imageIndex":5},{"imageOffset":130276,"symbol":"dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const","symbolLocation":320,"imageIndex":5},{"imageOffset":21972,"symbol":"start","symbolLocation":6524,"imageIndex":5}]},{"id":2628226,"threadState":{"x":[{"value":23},{"value":0},{"value":23},{"value":0},{"value":5066922816},{"value":2},{"value":1},{"value":18446744072367376383},{"value":5066922816},{"value":0},{"value":0},{"value":0},{"value":37172289116637620},{"value":1024},{"value":0},{"value":1885378665253537109},{"value":240},{"value":8488972576},{"value":0},{"value":23},{"value":4983792184},{"value":0},{"value":0},{"value":6163801456},{"value":5066922816},{"value":6163801072},{"value":6163801776},{"value":1},{"value":8490492672}],"flavor":"ARM_THREAD_STATE64","lr":{"value":6746363996},"cpsr":{"value":2147487744},"fp":{"value":6163800752},"sp":{"value":6163800560},"esr":{"value":1442840704,"description":"(Syscall)"},"pc":{"value":9828865536},"far":{"value":0}},"queue":"com.biliprobe.log","frames":[{"imageOffset":34304,"symbol":"listxattr","symbolLocation":8,"imageIndex":7},{"imageOffset":1624156,"symbol":"specialized _FileManagerImpl._extendedAttributes(at:followSymlinks:)","symbolLocation":104,"imageIndex":8},{"imageOffset":1269304,"symbol":"closure #1 in _FileManagerImpl.attributesOfItem(atPath:)","symbolLocation":9348,"imageIndex":8},{"imageOffset":1623512,"symbol":"partial apply for closure #1 in _FileManagerImpl.attributesOfItem(atPath:)","symbolLocation":24,"imageIndex":8},{"imageOffset":3687228,"symbol":"specialized String.withFileSystemRepresentation<A>(_:)","symbolLocation":244,"imageIndex":8},{"imageOffset":914600,"symbol":"specialized NSFileManager.withFileSystemRepresentation<A>(for:_:)","symbolLocation":184,"imageIndex":8},{"imageOffset":1259544,"symbol":"@objc _NSFileManagerBridge.attributesOfItem(atPath:)","symbolLocation":136,"imageIndex":8},{"imageOffset":43588,"symbol":"__ProbeLogv_block_invoke","symbolLocation":148,"imageIndex":2},{"imageOffset":7372,"symbol":"_dispatch_call_block_and_release","symbolLocation":32,"imageIndex":9},{"imageOffset":114644,"symbol":"_dispatch_client_callout","symbolLocation":16,"imageIndex":9},{"imageOffset":43132,"symbol":"_dispatch_lane_serial_drain","symbolLocation":644,"imageIndex":9},{"imageOffset":46192,"symbol":"_dispatch_lane_invoke","symbolLocation":312,"imageIndex":9},{"imageOffset":89240,"symbol":"_dispatch_root_queue_drain_deferred_wlh","symbolLocation":248,"imageIndex":9},{"imageOffset":87740,"symbol":"_dispatch_workloop_worker_thread","symbolLocation":640,"imageIndex":9},{"imageOffset":4664,"symbol":"_pthread_wqthread","symbolLocation":292,"imageIndex":10},{"imageOffset":2320,"symbol":"start_wqthread","symbolLocation":8,"imageIndex":10}]},{"id":2628227,"frames":[],"threadState":{"x":[{"value":6164377600},{"value":4099},{"value":6163841024},{"value":0},{"value":409604},{"value":18446744073709551615},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0}],"flavor":"ARM_THREAD_STATE64","lr":{"value":0},"cpsr":{"value":4096},"fp":{"value":0},"sp":{"value":6164377600},"esr":{"value":1442840704,"description":"(Syscall)"},"pc":{"value":6738831624},"far":{"value":0}}},{"id":2628229,"frames":[],"threadState":{"x":[{"value":6164951040},{"value":0},{"value":6164414464},{"value":0},{"value":278532},{"value":18446744073709551615},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0},{"value":0}],"flavor":"ARM_THREAD_STATE64","lr":{"value":0},"cpsr":{"value":4096},"fp":{"value":0},"sp":{"value":6164951040},"esr":{"value":0},"pc":{"value":6738831624},"far":{"value":0}}}],
+  "usedImages" : [
+  {
+    "source" : "P",
+    "arch" : "arm64",
+    "base" : 4303634432,
+    "size" : 494616576,
+    "uuid" : "fd1e02b1-d7d9-31d5-bb41-0acb58b3dff8",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/bili-universal",
+    "name" : "bili-universal"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64",
+    "base" : 4976001024,
+    "size" : 2359296,
+    "uuid" : "78181b09-4f09-38c4-a350-3adba468cd06",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/Frameworks\/BGM.framework\/BGM",
+    "name" : "BGM"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64",
+    "base" : 4961894400,
+    "size" : 98304,
+    "uuid" : "56378005-1a05-4665-ac48-39aafb577e7b",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/EC3081EF-E435-4642-BA3D-C1E7171C137B\/bili-universal.app\/Frameworks\/BiliProbe.dylib",
+    "name" : "BiliProbe.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6737559552,
+    "size" : 317640,
+    "uuid" : "e708dfc2-ba03-3c4c-8376-ffc11461c752",
+    "path" : "\/usr\/lib\/libobjc.A.dylib",
+    "name" : "libobjc.A.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6737924096,
+    "size" : 149524,
+    "uuid" : "a05b9af0-3e63-3f12-9e3e-5d3b5bb7518d",
+    "path" : "\/usr\/lib\/system\/libdyld.dylib",
+    "name" : "libdyld.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6738075648,
+    "size" : 749936,
+    "uuid" : "5fd0ed6b-d314-3392-aa82-91c9fc014422",
+    "path" : "\/usr\/lib\/dyld",
+    "name" : "dyld"
+  },
+  {
+    "size" : 0,
+    "source" : "A",
+    "base" : 0,
+    "uuid" : "00000000-0000-0000-0000-000000000000"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 9828831232,
+    "size" : 250364,
+    "uuid" : "66561a3e-67d2-3f28-9e5c-c7bde524ee9d",
+    "path" : "\/usr\/lib\/system\/libsystem_kernel.dylib",
+    "name" : "libsystem_kernel.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6744739840,
+    "size" : 17876060,
+    "uuid" : "b17a96f3-dc4a-3757-90df-be4837abb5aa",
+    "path" : "\/System\/Library\/Frameworks\/Foundation.framework\/Foundation",
+    "name" : "Foundation"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7524265984,
+    "size" : 290144,
+    "uuid" : "c9c06c2c-438c-3e88-aa74-dcce16127dc9",
+    "path" : "\/usr\/lib\/system\/libdispatch.dylib",
+    "name" : "libdispatch.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6738829312,
+    "size" : 49736,
+    "uuid" : "8674ae84-5a65-39b4-bcfe-a6178afd3eae",
+    "path" : "\/usr\/lib\/system\/libsystem_pthread.dylib",
+    "name" : "libsystem_pthread.dylib"
+  }
+],
+  "sharedCache" : {
+  "base" : 6733348864,
+  "size" : 6374752256,
+  "uuid" : "e2d6f6bd-03e7-3f04-bacd-9c086e5900f6"
+},
+  "vmSummary" : "ReadOnly portion of Libraries: Total=2.9G resident=0K(0%) swapped_out_or_unallocated=2.9G(100%)\nWritable regions: Total=125.7M written=738K(1%) resident=738K(1%) swapped_out=0K(0%) unallocated=125.0M(99%)\n\n                                VIRTUAL   REGION \nREGION TYPE                        SIZE    COUNT (non-coalesced) \n===========                     =======  ======= \nActivity Tracing                   256K        1 \nDeferred Reclaim                  64.0M        1 \nGuard                            385.0G        1 \nMalloc                            31.2M       14 \nMalloc Guard Page                 3552K        4 \nOS Alloc Once                       32K        1 \nStack                             2640K        4 \nStack Guard                         64K        4 \n__AUTH                            9654K      779 \n__AUTH_CONST                     118.6M     1195 \n__CTF                               824        1 \n__DATA                           115.8M     1204 \n__DATA_CONST                     102.7M     1249 \n__DATA_DIRTY                      18.5M     1117 \n__FONT_DATA                        2352        1 \n__LINKEDIT                       673.7M        4 \n__LYNX__DATA                        16K        1 \n__OBJC_RO                        126.5M        1 \n__OBJC_RW                         3355K        1 \n__TEXT                             2.2G     1285 \n__TPRO_CONST                       132K        4 \nmapped file                       44.7M        5 \npage table in kernel               738K        1 \nshared memory                       96K        4 \n===========                     =======  ======= \nTOTAL                            388.5G     6882 \n",
+  "legacyInfo" : {
+  "threadTriggered" : {
+    "queue" : "com.apple.main-thread"
+  }
+},
+  "logWritingSignature" : "c60fb987d6c705436a7b97fc3558d15cfdeb7f67",
+  "bug_type" : "309",
+  "roots_installed" : 0,
+  "trmStatus" : 1,
+  "sandboxProfileName" : "container",
+  "spawnFlags" : 17932,
+  "trialInfo" : {
+  "rollouts" : [
+    {
+      "rolloutId" : "6081ed9716bb6d61d81d5014",
+      "factorPackIds" : [
+        "6aaac2dee8599f510bd7b5e5"
+      ],
+      "deploymentId" : 250004171
+    },
+    {
+      "rolloutId" : "60f8ddccefea4203d95cbeef",
+      "factorPackIds" : [
+
+      ],
+      "deploymentId" : 250000033
+    }
+  ],
+  "experiments" : [
+    {
+      "treatmentId" : "79ab2405-38c9-4893-8257-dd75d3536a8e",
+      "experimentId" : "6a39873949f37f57cc6838ec",
+      "deploymentId" : 400000005
+    },
+    {
+      "treatmentId" : "cd952bca-2fb3-4e6e-b40f-b11e364bdb66",
+      "experimentId" : "68fe4accf23ec52b15be139f",
+      "deploymentId" : 400000012
+    }
+  ]
+}
+}
