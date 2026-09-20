@@ -1,0 +1,72 @@
+{
+  "ipa": "哔哩哔哩_1.0.23_轻量版本.ipa",
+  "size": 20049589,
+  "apps": [
+    "bili.app"
+  ],
+  "app": "Payload/bili.app",
+  "CFBundleExecutable": "bili",
+  "CFBundleIdentifier": "nsk-1695.v-team.cn",
+  "CFBundleShortVersionString": "1.0.23",
+  "CFBundleName": "哔哩哔哩",
+  "MinimumOSVersion": "10.0",
+  "DTPlatformVersion": "26.5",
+  "DTSDKName": "iphoneos26.5",
+  "encrypted_binary": null,
+  "cpu": "arm64",
+  "ncmds": 70,
+  "encryption": [
+    {
+      "cryptid": 0,
+      "cryptsize": 16875520
+    }
+  ],
+  "dylibs": [
+    "/System/Library/Frameworks/Foundation.framework/Foundation",
+    "/usr/lib/libobjc.A.dylib",
+    "/usr/lib/libSystem.B.dylib",
+    "/System/Library/Frameworks/AVFAudio.framework/AVFAudio",
+    "/System/Library/Frameworks/AVFoundation.framework/AVFoundation",
+    "/System/Library/Frameworks/AVKit.framework/AVKit",
+    "/System/Library/Frameworks/Combine.framework/Combine",
+    "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+    "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+    "/System/Library/Frameworks/CoreImage.framework/CoreImage",
+    "/System/Library/Frameworks/CoreMedia.framework/CoreMedia",
+    "/System/Library/Frameworks/CoreTransferable.framework/CoreTransferable",
+    "/System/Library/Frameworks/CoreVideo.framework/CoreVideo",
+    "/System/Library/Frameworks/CryptoKit.framework/CryptoKit",
+    "/System/Library/Frameworks/ImageIO.framework/ImageIO",
+    "/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer",
+    "/System/Library/Frameworks/Network.framework/Network",
+    "/System/Library/Frameworks/Photos.framework/Photos",
+    "/System/Library/Frameworks/PhotosUI.framework/PhotosUI",
+    "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+    "/System/Library/Frameworks/SafariServices.framework/SafariServices",
+    "/System/Library/Frameworks/Security.framework/Security",
+    "/System/Library/Frameworks/SwiftUI.framework/SwiftUI",
+    "/System/Library/Frameworks/Symbols.framework/Symbols",
+    "/System/Library/Frameworks/UIKit.framework/UIKit",
+    "/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox",
+    "/System/Library/Frameworks/WebKit.framework/WebKit",
+    "/System/Library/Frameworks/_PhotosUI_SwiftUI.framework/_PhotosUI_SwiftUI",
+    "/usr/lib/libcompression.dylib",
+    "/usr/lib/libz.1.dylib",
+    "/usr/lib/swift/libswiftAVFoundation.dylib",
+    "/usr/lib/swift/libswiftCore.dylib",
+    "/usr/lib/swift/libswiftCoreFoundation.dylib",
+    "/usr/lib/swift/libswiftCoreMedia.dylib",
+    "/usr/lib/swift/libswiftDispatch.dylib",
+    "/usr/lib/swift/libswiftObjectiveC.dylib",
+    "/usr/lib/swift/libswiftQuartzCore.dylib",
+    "/usr/lib/swift/libswiftUniformTypeIdentifiers.dylib",
+    "/usr/lib/swift/libswift_Concurrency.dylib",
+    "/usr/lib/swift/libswiftos.dylib"
+  ],
+  "rpaths": [
+    "@executable_path/Frameworks"
+  ],
+  "frameworks": {},
+  "root_dylibs": {},
+  "keyword_hits": {}
+}
