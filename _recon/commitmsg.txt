@@ -1,0 +1,24 @@
+feat(probe): 官方客户端注入探针 + 自研注入器（阶段 1）
+
+侦察（实测，非推测）：
+- 脱壳 IPA 9.12.0：arm64 瘦切片、cryptid=0、97 个依赖全为系统库
+- ATS NSAllowsArbitraryLoads=true（明文 HTTP 可用）
+- UIFileSharingEnabled=true → 日志可从「文件」App 直接取
+- 视频链路：App 自己实现 AVAssetResourceLoaderDelegate（BBRResourceLoaderManager 等）
+- 网络栈：NSURLSession + CFNetwork + 静态链接 AFNetworking，无第三方网络库
+- App 自带 PCDN/MCDN（mcdn.bilivideo.cn、P2PCDNConnectionV2/V3、竞速多连接）
+  → 目标因此修正为「去掉 PCDN + 直连优选节点 + 自并发」，而非「从零加并发」
+
+注入器：
+- 实测 load command 区有 131,328 字节空隙，新增 LC_LOAD_DYLIB 仅需 72 字节
+- 故采用原地扩展：不搬动 __TEXT、不重定位指针、不改 vmaddr/fileoff、文件长度不变
+- 空隙不足时直接报错退出，绝不硬来
+- 本地自测：合成无空隙用例拒绝、合成有空隙用例通过、真实二进制结构校验通过
+
+探针 BiliProbe.m：
+- 只挂 AVAssetResourceLoader 观测点 + 运行时类枚举，不碰 NSURLSession/NSURLProtocol 热路径
+- 刻意不 hook AVURLAsset init（initializer 交换无法同时避免递归与破坏构造）
+- 显式声明唯一的行为改动：shouldWaitForLoading 恒返回 NO，并据此限制结论适用范围
+
+CI：macos-26 runner 编译 dylib（Theos，arm64/iOS14.0/不依赖 Theos 运行时），
+可选注入重签出 IPA；同时产出全能签插件包。

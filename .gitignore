@@ -1,0 +1,29 @@
+# 脱壳 IPA 与解包产物：体积大且涉及第三方版权，绝不入库
+*.ipa
+*.tipa
+*.app/
+Payload/
+work/
+work2/
+
+# 会话导出与侦察中间产物
+# （keyword_groups/recon 含从官方二进制提取的字符串，属第三方内容，不入远端）
+_session_extract/
+dsh-session-session-*.zip
+_recon/strings_all.txt
+_recon/objc_methods.tsv
+_recon/keyword_groups.json
+_recon/recon.json
+
+# 构建产物
+dist/
+.theos/
+inject/probe/.theos/
+*.dylib
+*.o
+
+# 系统噪音
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

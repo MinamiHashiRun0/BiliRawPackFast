@@ -1,0 +1,147 @@
+{
+  "ncmds": 145,
+  "sizeofcmds": 16096,
+  "lc_end": 16128,
+  "code_signature": {
+    "dataoff": 614459904,
+    "datasize": 15623488
+  },
+  "dylib_count": 97,
+  "gap": 131328,
+  "segments": [
+    {
+      "name": "__PAGEZERO",
+      "vmaddr": 0,
+      "vmsize": 4294967296,
+      "fileoff": 0,
+      "filesize": 0,
+      "nsects": 0
+    },
+    {
+      "name": "__TEXT",
+      "vmaddr": 4294967296,
+      "vmsize": 494616576,
+      "fileoff": 0,
+      "filesize": 494616576,
+      "nsects": 32
+    },
+    {
+      "name": "__DATA_CONST",
+      "vmaddr": 4789583872,
+      "vmsize": 67289088,
+      "fileoff": 494616576,
+      "filesize": 67289088,
+      "nsects": 16
+    },
+    {
+      "name": "__DATA",
+      "vmaddr": 4856872960,
+      "vmsize": 64651264,
+      "fileoff": 561905664,
+      "filesize": 36487168,
+      "nsects": 19
+    },
+    {
+      "name": "__LYNX__DATA",
+      "vmaddr": 4921524224,
+      "vmsize": 16384,
+      "fileoff": 598392832,
+      "filesize": 16384,
+      "nsects": 1
+    },
+    {
+      "name": "__LINKEDIT",
+      "vmaddr": 4921540608,
+      "vmsize": 31686656,
+      "fileoff": 598409216,
+      "filesize": 31674176,
+      "nsects": 0
+    }
+  ],
+  "first_text_sections": [
+    {
+      "seg": "__TEXT",
+      "name": "__text",
+      "addr": 4295114752,
+      "size": 416459296,
+      "offset": 147456
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__stubs",
+      "addr": 4711574048,
+      "size": 55524,
+      "offset": 416606752
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__objc_stubs",
+      "addr": 4711629600,
+      "size": 7044256,
+      "offset": 416662304
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__init_offsets",
+      "addr": 4718673856,
+      "size": 9452,
+      "offset": 423706560
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__objc_methlist",
+      "addr": 4718683312,
+      "size": 9485232,
+      "offset": 423716016
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__cstring",
+      "addr": 4728168544,
+      "size": 10047247,
+      "offset": 433201248
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__swift5_entry",
+      "addr": 4738215792,
+      "size": 8,
+      "offset": 443248496
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__const",
+      "addr": 4738215808,
+      "size": 17596574,
+      "offset": 443248512
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__objc_classname",
+      "addr": 4755812384,
+      "size": 2177596,
+      "offset": 460845088
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__constg_swiftt",
+      "addr": 4757989980,
+      "size": 2518864,
+      "offset": 463022684
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__swift5_typeref",
+      "addr": 4760508848,
+      "size": 929244,
+      "offset": 465541552
+    },
+    {
+      "seg": "__TEXT",
+      "name": "__swift5_fieldmd",
+      "addr": 4761438092,
+      "size": 1374608,
+      "offset": 466470796
+    }
+  ]
+}
