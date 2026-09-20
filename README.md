@@ -58,11 +58,14 @@ SIDX 解析被刻意拆成「纯 C 核心 + ObjC 薄外壳」，于是验证也�
 
 ### 已交付产物
 
-`BiliProbe.dylib`（**v2**，真·只读版），114,688 字节
-SHA256 `0E28FF6F8CC37F1D0A48796700841F016A6AF3418CB546941282C09E8503182D`
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| `BiliProbe.dylib`（v3） | 168,480 字节 | 裸 dylib，走全能签「插件注入」 |
+| `bili-9.12.0-probe-injected.ipa` | 278,782,765 字节 | 预注入版，只需签名（推荐） |
 
-> v1 曾让 `shouldWaitForLoading` 恒返回 NO（行为改动），已废弃并从交付目录移除。
-> 只装 v2。
+dylib SHA256 `D4136F092492EEDA18C1E317FD74CCD8425846DE084091B32616FC77A98E5F39`
+
+> v1（恒返回 NO 的行为改动版）与 v2 已废弃并从交付目录移除，只装 v3。
 
 ```
 Mach-O 64-bit dynamically linked shared library arm64
@@ -96,11 +99,37 @@ install name : @executable_path/Frameworks/BiliProbe.dylib
 
 ### 真机步骤
 
-1. 把 `BiliProbe.dylib` 传到手机（文件 / 微信 / 局域网均可）
-2. 全能签 → 插件（或「注入插件」）→ 导入 `BiliProbe.dylib`
-3. 对哔哩哔哩 IPA 启用该插件 → 用你自己的证书签名安装
-4. 打开 App，**随便播一个视频，等 10 秒**
-5. 「文件」App → 我的 iPhone → 哔哩哔哩 → `biliprobe/`
+**两种装法二选一，不可叠加**（叠加会让 dylib 加载两次，hook 幂等不会崩但日志翻倍）。
+
+**方式 A（推荐，更省事）**：用预注入版 IPA，只需签名
+1. 把 `bili-9.12.0-probe-injected.ipa` 传到手机
+2. 全能签打开它 → 用自己的证书签名安装（**不要**再启用插件注入）
+3. 打开 App，播一个视频，**停留 20 秒以上**
+4. 「文件」App → 我的 iPhone → 哔哩哔哩 → `biliprobe/`
+
+**方式 B**：裸 `BiliProbe.dylib` + 全能签「插件注入」。
+
+预注入版 IPA 由 `_recon/build_injected_ipa.py` 生成，对真实 IPA 自校验通过：
+dylib 就位且内容一致、原有 2825 个条目全部保留、`LC_LOAD_DYLIB` 就位、
+主二进制长度不变。注意它**只注入不签名** —— 签名必须 macOS 的 `codesign`。
+
+### 探针 v3：心跳与结论（把真机往返压到一次）
+
+探针每 15 秒写一行心跳，第 45 秒写一行 `[verdict]` 结论，覆盖四种情况：
+
+| verdict | 含义 | 下一步 |
+|---|---|---|
+| ✅ | 注入成功且已捕获资源加载链路 | 据此定 stage 2 的 hook 点 |
+| ⚠️ | 委托 hook 已挂，但 `shouldWait` 从未触发 | 视频不走此路径 → 改看 `[session]` 行 |
+| ⚠️ | `setDelegate` 被调用但钩子没挂上 | 探针自身缺陷，需回报 |
+| ❌ | dylib 已加载但 `AVAssetResourceLoader` 完全未被使用 | 看 `[session]` 计数：>0 则换注入点；都为 0 则走的是自研 socket 栈 |
+
+**只发 `trace.log` 就能判断下一步**，不必靠来回猜测。
+
+另外加了一个**高度过滤的兜底观测点**：host 含 `bilivideo`/`mcdn`/`akamai`/`hdslb`/`upos`
+的 `NSURLSession` 请求会被记录，其余请求只做一次子串判断随即转发。
+上一轮我曾刻意回避 hook `NSURLSession`（怕污染流畅度结论）；这轮改变权衡的理由是：
+不做的话，一旦「视频走 AVAssetResourceLoader」这个假设不成立，整轮真机测试就白跑了。
 
 ### 需要拿回来的东西（按重要性排序）
 
