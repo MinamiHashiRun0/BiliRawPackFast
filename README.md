@@ -168,10 +168,14 @@ Actions → `Build BiliProbe` → Run workflow。
 
 ## 已知限制
 
-- 探针会挂 4 个 delegate 观测方法，并让
-  `shouldWaitForLoadingOfRequestedResource` 恒返回 NO ——
-  **这是行为改动**。因此本轮真机结果只能判定"注入是否可行 + 链路长什么样"，
-  **不能**用来比较官方 App 与原版的流畅度。详见 `inject/probe/BiliProbe.m` 头部声明。
+- ~~探针会让 `shouldWaitForLoadingOfRequestedResource` 恒返回 NO~~ ——
+  **已在探针 v2 消除**。改为「原 IMP 查表 + 转发」：观测方法把原实现的真实
+  返回值带回，因此探针不改变 App 的任何行为，真机结果可直接用于判断
+  官方 App 注入后是否依然流畅。详见 `inject/probe/BiliProbe.m` 头部声明。
+- 探针仍会把 4 个 delegate 方法的实现换成路由器，并多打一行日志。
+  日志走异步队列、不阻塞调用方；且 `shouldWaitForLoading` 由 AVFoundation
+  控制调用频率（非每帧），因此不应引入可观测卡顿 —— 但这一点**尚未真机验证**。
 - 脱壳包不含 `embedded.mobileprovision`，无法还原原始 entitlements；
   自签用最小集合，全能签签名时会替换成你证书对应值。
+  workflow 会先尝试用 `codesign -d --entitlements :-` 从原签名里抽原始值。
 - 尚未实现任何 CDN/并发功能。

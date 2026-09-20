@@ -1,33 +1,31 @@
-feat(deliver): dylib 构建通过并独立复核 —— 交付探针
+refactor(probe): 探针 v2 —— 消除唯一的行为改动，改为真·只读
 
-CI（run 35523085355）结果：
-  Build BiliProbe.dylib  ✓
-  Verify dylib           ✓
-  Package for signing    ✓
-  Upload dylib           ✓
-  Upload plugin package  ✓
-  Release dylib only     ✘ 仅此一步失败
+问题（上一版自己承认的限制）：
+  shouldWaitForLoadingOfRequestedResource 恒返回 NO，属行为改动，
+  会把真机结论限定在「注入是否可行」，无法回答「注入后是否依然流畅」。
 
-产物实测（Verify 输出）：
-  Mach-O 64-bit dynamically linked shared library arm64
-  依赖 6 个，全部系统库：libobjc.A / Foundation / CoreFoundation /
-    UIKit / AVFoundation / libSystem.B
-  install name = @executable_path/Frameworks/BiliProbe.dylib
+根因不是「必须如此」，而是上一版没有保存原 IMP：
+  交换实现后原实现被挪走，probe 方法里既不能回调 _cmd（无限递归），
+  也拿不到原返回值，只能返回常量。
 
-本地独立复核 _recon/verify_dylib.py（不依赖 macOS 工具，自己解析 Mach-O）：
-  ✔ arm64 瘦切片、MH_DYLIB
-  ✔ install name 正确
-  ✔ 未加密（cryptid 全 0）
-  ✔ 6 个依赖全为系统库/自身路径
-  ✔ 平台 iOS、部署目标 14.0.0（与 App 主二进制 minos 一致）
-  ✔ 已带 ad-hoc 代码签名
-  ✔ 含 BiliProbe / biliprobe 标记
-  sha256 = 16A64214F6130A82F0387717930079CD31693C28B10BA98F3B61E7B9B8ED747F
+修复：原 IMP 查表 + 回收站方案
+  ProbeInstallOne:
+    1. 从 class_copyMethodList 取「本类自己的」原 IMP（避免误抓父类实现串味）
+    2. 原实现搬进 biliprobe_recycle_<选择子> 回收站方法
+    3. 真实选择子指向 ProbeRecycledCall 路由器
+    4. 表里登记「观测方法」的 IMP（不是原 IMP —— 否则路由器转发时会绕过观测方法）
+  ProbeRecycledCall: 按 _cmd 分派到四个观测方法
+  ProbeForwardToOriginal: 查回原实现并调用，返回其真实返回值
 
-修复：
-  * workflow 加 permissions: contents: write —— 否则建 release 报
-    "Resource not accessible by integration"
-  * verify_dylib.py 第一版把「存在 LC_ENCRYPTION_INFO_64」误判为已加密；
-    链接器默认就会发这条命令，正确判据是 cryptid 是否为 0。已改正。
+  于是：返回值 === 原实现的返回值 ⇒ 探针零行为改动。
 
-交付：deliver/BiliProbe.dylib（114,688 字节）+ 使用说明。
+顺带修掉的问题：
+  * 删掉三个死代码 helper（ProbeSwizzle / ProbeSwizzleOwnMethod /
+    ProbeAddMethodIfAbsent）—— 它们属「分类 + probe_ 选择子」旧写法，
+    新方案落地后已无调用点。留死代码会让人以为存在两条 hook 路径。
+  * 新增前置声明区，消除 static 函数顺序依赖
+  * 新增 _recon/check_objc.py 静态自检：括号平衡、残留引用（排除注释）、
+    先声明后使用、@end 配对、观测方法是否真的转发了原实现
+
+验证：check_objc.py 全项通过；preflight.py 全项通过。
+真机尚未验证（等用户回传 biliprobe 日志）。
