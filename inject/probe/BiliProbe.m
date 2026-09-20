@@ -196,6 +196,12 @@ static void        ProbeFindResourceLoaderDelegates(void);
 static void        ProbeLogEnvironment(void);
 static void        ProbeInstallOne(Class cls, SEL sel, NSString *tag);
 
+// 备选观测点（NSURLSession 媒体请求兜底）
+static NSURLSessionDataTask *ProbeDataTaskWithRequestCompletion(id self, SEL _cmd,
+                                                               NSURLRequest *request,
+                                                               void (^handler)(NSData *, NSURLResponse *, NSError *));
+static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request);
+
 @implementation BiliProbe
 
 //=== 0. 转发与路由 ============================================================
@@ -345,7 +351,73 @@ static void ProbeDidCancelLoading(id self, SEL _cmd,
     (void)ProbeForwardToOriginal(self, _cmd, loader, request);
 }
 
-//=== 2. AVURLAsset ============================================================
+//=== 2. 备选观测点：NSURLSession 上的媒体请求 ==================================
+// 为什么需要：主观测点假设「视频字节经 AVAssetResourceLoaderDelegate」。
+// 若这个假设不成立（App 用自研 socket 栈或别的路径），主观测点会一条日志都没有，
+// 我们就完全瞎了。这里补一个**高度过滤**的观测点作为兜底：
+//   * 只对 host 含 bilivideo / mcdn / akamai 的请求展开记录
+//   * 其余请求立即原样转发，不做任何额外工作
+// 之所以敢碰 NSURLSession（上一轮我曾刻意回避它）：过滤足够窄，
+// 非媒体请求的额外开销只有一次字符串包含判断。
+// 仍需注意：这是真·全 App 热路径，若日志出现明显增长要能立刻收窄或撤掉。
+
+static _Atomic(int32_t) gCntSessionMediaReq = 0;
+
+static BOOL ProbeHostLooksLikeMedia(NSURL *url) {
+    if (!url) return NO;
+    NSString *host = url.host;
+    if (host.length == 0) return NO;
+    // 用 lowercaseString 一次，避免多次大小写不敏感比较
+    static NSArray<NSString *> *needles = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        needles = @[@"bilivideo", @"mcdn", @"akamai", @"hdslb", @"upos"];
+    });
+    for (NSString *n in needles) {
+        if ([host rangeOfString:n options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+/// 原始 IMP，不调 _cmd，避免 initializer 类方法递归
+static NSURLSessionDataTask *(*gOrigDataTaskCR)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
+static IMP gOrigDataTaskC = NULL;
+static IMP gOrigDataTaskD = NULL;
+
+static NSURLSessionDataTask *ProbeDataTaskWithRequestCompletion(id self, SEL _cmd,
+                                                               NSURLRequest *request,
+                                                               void (^handler)(NSData *, NSURLResponse *, NSError *)) {
+    if (gOrigDataTaskCR == NULL && gOrigDataTaskC) {
+        gOrigDataTaskCR = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))gOrigDataTaskC;
+    }
+    if (ProbeHostLooksLikeMedia(request.URL)) {
+        ProbeBump(&gCntSessionMediaReq);
+        PLog(@"session", @"媒体请求 method=%@ host=%@ range=%@\n          URL=%.360@",
+             request.HTTPMethod ?: @"?",
+             request.URL.host ?: @"?",
+             [request valueForHTTPHeaderField:@"Range"] ?: @"(无)",
+             request.URL.absoluteString ?: @"?");
+    }
+    if (gOrigDataTaskCR) return gOrigDataTaskCR(self, _cmd, request, handler);
+    return nil;
+}
+
+static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    if (ProbeHostLooksLikeMedia(request.URL)) {
+        ProbeBump(&gCntSessionMediaReq);
+        PLog(@"session", @"媒体请求(无回调) method=%@ host=%@ range=%@\n          URL=%.360@",
+             request.HTTPMethod ?: @"?",
+             request.URL.host ?: @"?",
+             [request valueForHTTPHeaderField:@"Range"] ?: @"(无)",
+             request.URL.absoluteString ?: @"?");
+    }
+    if (gOrigDataTaskD) {
+        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))gOrigDataTaskD)(self, _cmd, request);
+    }
+    return nil;
+}
+
+//=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
 // 探针方法里既不能回调 _cmd（无限递归），也无法在不持有原 IMP 的情况下
@@ -709,7 +781,18 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"✗ AVAssetResourceLoader 不在运行时");
         }
 
-        // ② AVURLAsset 刻意不挂 —— 理由见上方注释（initializer 交换会打断资源创建）
+        // ② 备选观测点：NSURLSession 上的媒体请求（高度过滤，仅作兜底）
+        Class sess = NSClassFromString(@"NSURLSession");
+        if (sess) {
+            gOrigDataTaskC = ProbeReplaceMethod(
+                sess, @selector(dataTaskWithRequest:completionHandler:),
+                (IMP)ProbeDataTaskWithRequestCompletion, "@@:@@@");
+            gOrigDataTaskD = ProbeReplaceMethod(
+                sess, @selector(dataTaskWithRequest:),
+                (IMP)ProbeDataTaskWithRequest, "@@:@@");
+        } else {
+            PLog(@"hook", @"✗ NSURLSession 不在运行时（异常）");
+        }
 
         // ③ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
@@ -747,10 +830,13 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 int32_t renewals    = ProbeRead(&gCntRenewal);
                 int32_t auths       = ProbeRead(&gCntAuthChallenge);
                 int32_t cancels     = ProbeRead(&gCntDidCancel);
+                int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
 
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 已挂委托类=%d "
-                              @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d",
-                     beats, beats * 15, hookClasses, setDel, waits, renewals, auths, cancels);
+                              @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d "
+                              @"NSURLSession媒体请求=%d",
+                     beats, beats * 15, hookClasses, setDel, waits, renewals, auths, cancels,
+                     sessMedia);
 
                 // 45 秒做一次结论：这段足够用户播一个视频
                 if (beats == 3) {
@@ -760,17 +846,20 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                     } else if (hookClasses > 0) {
                         PLog(@"verdict", @"⚠️ 结论：注入成功、委托 hook 已挂，但 "
                                          @"shouldWait 一次都没触发。说明 App 取视频数据"
-                                         @"没走 AVAssetResourceLoaderDelegate —— "
-                                         @"阶段 2 需要改用其它注入点（见 README 的备选）");
+                                         @"没走 AVAssetResourceLoaderDelegate。"
+                                         @"此时请重点看本文件里 [session] 行 —— "
+                                         @"那是我为这种情况准备的兜底观测点");
                     } else if (setDel > 0) {
                         PLog(@"verdict", @"⚠️ 结论：setDelegate:queue: 被调用了，但委托类"
                                          @"钩子没挂上 —— 探针自身缺陷，请回报此文件");
                     } else {
                         PLog(@"verdict", @"❌ 结论：注入的 dylib 已加载（能写这份日志即为证据），"
                                          @"但 AVAssetResourceLoader 完全没有被使用。"
-                                         @"若你确实播放了视频，则说明该 App 的视频数据"
-                                         @"不经 AVAssetResourceLoaderDelegate，"
-                                         @"阶段 2 必须换注入点");
+                                         @"若你确实播放了视频：NSURLSession媒体请求=%d，"
+                                         @"若该数也 >0 则请看 [session] 行定的新注入点；"
+                                         @"若两者都为 0，说明视频走的既不是资源加载器也不是"
+                                         @"NSURLSession（可能是自研 socket 栈），需要换思路",
+                             sessMedia);
                     }
                 }
             }
