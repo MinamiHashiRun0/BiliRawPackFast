@@ -82,10 +82,19 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def build_payload(segments, seg_size):
-    buf = bytearray()
-    for i in range(segments):
-        buf.extend(bytes([(i + 0xB1) & 0xFF]) * seg_size)
-    return bytes(buf)
+    """
+    载荷的第 i 个字节 = i % 251。
+
+    为什么用「按字节位置」而不是「按段号」编码：
+      最初的实现是每段填一个属于该段的常量字节。结果测试里所有
+      「逐段内容逐字节正确」都失败了 —— 因为夹具是按 256KiB 段生成的，
+      而测试用例会用 4KiB 的段去断言，两者分段粒度不同，期望值对不上。
+      问题出在夹具设计，不在被测引擎（引擎的按序/段数/重试/降级都通过了）。
+      改成按字节位置编码后，夹具与分段方式无关：
+      任意分段下，只要「第 k 段应从偏移 o 取 n 字节」，期望内容就唯一确定。
+    251 取质数，避免与段长或块长的任何对齐关系。
+    """
+    return bytes((i % 251) for i in range(segments * seg_size))
 
 
 def main():

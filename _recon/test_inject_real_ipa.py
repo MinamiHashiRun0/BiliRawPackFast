@@ -35,36 +35,47 @@ problems = []
 
 
 def parse_header(data: bytes):
-    """返回 (ncmds, sizeofcmds, endian, code_sig_dataoff_value, dylibs, dataoff_field_offset)
+    """返回一个 dict，字段偏移全部由解析得出，**不手算**。
 
-    dataoff_field_offset 是该字段在文件中的真实字节偏移（实测为命令起始 +16），
-    供逐字节差异核对精确圈定允许改动范围，避免凭印象写出 +8 这种错。
+    这条经验是被咬出来的：本文件里"允许改动范围"的偏移量前后算错过三次
+    （dataoff 的 +8 vs +16、datasize 的 +12 vs +16）。
+    根因都是凭印象推导 LC_CODE_SIGNATURE 的字段布局。
+    实测布局（cmdsize=16）：
+        +0  cmd = 0x1D
+        +4  cmdsize = 16
+        +8  dataoff          ← 签名 blob 的文件偏移
+        +12 datasize         ← 签名 blob 的长度
+        +16 保留（对齐填充）
+    因此这里直接返回字段的绝对偏移，调用方不再推导。
     """
     be = struct.unpack_from(">I", data, 0)[0]
     le = struct.unpack_from("<I", data, 0)[0]
     if le == 0xFEEDFACF:
-        fmt, endian = "<", "le"
+        fmt = "<"
     elif be == 0xFEEDFACF:
-        fmt, endian = ">", "be"
+        fmt = ">"
     else:
         raise SystemExit(f"不是 64 位 Mach-O: be={hex(be)} le={hex(le)}")
 
     ncmds, sizeofcmds = struct.unpack_from(fmt + "II", data, 16)
     off = 32
-    code_sig = None
-    code_sig_field = None
-    dylibs = []
+    out = {"ncmds": ncmds, "sizeofcmds": sizeofcmds, "dylibs": [],
+           "sig_cmd_off": None, "dataoff_field": None, "datasize_field": None,
+           "dataoff": None, "datasize": None}
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from(fmt + "II", data, off)
         if cmd == LC_CODE_SIGNATURE:
-            code_sig = struct.unpack_from(fmt + "I", data, off + 8)[0]
-            code_sig_field = off + 8
+            out["sig_cmd_off"] = off
+            out["dataoff_field"] = off + 8
+            out["datasize_field"] = off + 12
+            out["dataoff"] = struct.unpack_from(fmt + "I", data, off + 8)[0]
+            out["datasize"] = struct.unpack_from(fmt + "I", data, off + 12)[0]
         elif cmd == LC_LOAD_DYLIB:
             nameoff = struct.unpack_from(fmt + "I", data, off + 8)[0]
             nm = data[off + nameoff:off + cmdsize].split(b"\x00")[0].decode("utf-8", "replace")
-            dylibs.append(nm)
+            out["dylibs"].append(nm)
         off += cmdsize
-    return ncmds, sizeofcmds, endian, code_sig, dylibs, code_sig_field
+    return out
 
 
 def main():
@@ -117,56 +128,66 @@ def main():
             else:
                 print(f"  主二进制长度不变 ✓ ({len(a):,} 字节)")
 
-            n1, s1, e1, cs1, d1, csf1 = parse_header(a)
-            n2, s2, e2, cs2, d2, csf2 = parse_header(b)
-            print(f"  ncmds {n1} → {n2}   sizeofcmds {s1:,} → {s2:,}")
+            n1 = parse_header(a)
+            n2 = parse_header(b)
+            s1, s2 = n1["sizeofcmds"], n2["sizeofcmds"]
+            added = s2 - s1
+            print(f"  ncmds {n1['ncmds']} → {n2['ncmds']}   sizeofcmds {s1:,} → {s2:,}")
 
-            if n2 != n1 + 1:
-                problems.append(f"ncmds 增量应为 1，实际 {n2 - n1}")
+            if n2["ncmds"] != n1["ncmds"] + 1:
+                problems.append(f"ncmds 增量应为 1，实际 {n2['ncmds'] - n1['ncmds']}")
             else:
                 print("  ncmds +1 ✓")
 
-            added = s2 - s1
             if added != 72:
                 problems.append(f"sizeofcmds 增量应为 72，实际 {added}")
             else:
                 print("  sizeofcmds +72 ✓")
 
-            if INSTALL_NAME not in d2:
+            if INSTALL_NAME not in n2["dylibs"]:
                 problems.append(f"输出里没有 {INSTALL_NAME}")
             else:
-                print(f"  LC_LOAD_DYLIB 已加入 ✓ 共 {len(d2)} 条")
+                print(f"  LC_LOAD_DYLIB 已加入 ✓ 共 {len(n2['dylibs'])} 条")
 
-            if INSTALL_NAME in d1:
+            if INSTALL_NAME in n1["dylibs"]:
                 problems.append("输入里本来就有该 dylib（不该发生）")
 
-            if cs1 is None or cs2 is None:
+            if n1["dataoff"] is None or n2["dataoff"] is None:
                 problems.append("找不到 LC_CODE_SIGNATURE")
-            elif cs2 != cs1 + added:
-                problems.append(f"签名 dataoff 未同步：{cs1} → {cs2}，期望 +{added}")
             else:
-                print(f"  LC_CODE_SIGNATURE dataoff {cs1:,} → {cs2:,} (+{added}) ✓")
+                # dataoff 必须不变：新增的 72 字节落在 load command 区与首个
+                # section 之间的空隙里，而签名 blob 在文件末尾，文件长度都没变，
+                # 它的偏移自然不动。（最初这里断言 +72，是错的，已修正。）
+                if n2["dataoff"] != n1["dataoff"]:
+                    problems.append(
+                        f"签名 dataoff 被改了：{n1['dataoff']} → {n2['dataoff']}（应当不变）")
+                else:
+                    print(f"  LC_CODE_SIGNATURE dataoff 保持不变 ✓ ({n1['dataoff']:,})")
+                if n2["datasize"] != 0:
+                    problems.append(f"datasize 未置 0（={n2['datasize']}），原签名未失效")
+                else:
+                    print(f"  LC_CODE_SIGNATURE datasize 已置 0 ✓"
+                          f"（原 {n1['datasize']:,} → 0，强制重签）")
 
             # 逐字节差异核对：只允许三处变化
             #   ① header 的 ncmds/sizeofcmds（偏移 16..24）
             #   ② 新增 LC_LOAD_DYLIB 占用的 [lc_end, lc_end+72)
-            #   ③ LC_CODE_SIGNATURE 里的 dataoff 字段
-            #      ⚠️ 该字段位于命令起始 +16（cmd@0, cmdsize@4, dataoff@8..12？
-            #      不 —— 实测布局是 cmd@0 cmdsize@4 然后 4 字节对齐填充，
-            #      dataoff 实际落在命令起始 +16）。
-            #      第一版这里写成 +8，导致把「正确更新 dataoff」误判成越界修改。
-            #      教训：核对脚本自己也要用实测偏移，不能凭印象写。
+            #   ③ LC_CODE_SIGNATURE 的 datasize 字段（4 字节）—— 偏移由解析给出，
+            #      不手算。这一段的偏移量在本文件里前后算错过三次
+            #      （dataoff 的 +8/+16、datasize 的 +12/+16），
+            #      根因都是凭印象推 LC_CODE_SIGNATURE 的布局；
+            #      改成从 parse_header 拿绝对偏移后就不会再错。
             lc_end = 32 + s1
             allowed = set(range(16, 24)) | set(range(lc_end, lc_end + added))
-            if csf1 is not None:
-                allowed |= set(range(csf1, csf1 + 4))
+            if n1["datasize_field"] is not None:
+                allowed |= set(range(n1["datasize_field"], n1["datasize_field"] + 4))
             diff = [i for i in range(min(len(a), len(b))) if a[i] != b[i]]
             unexpected = [i for i in diff if i not in allowed]
             print(f"  逐字节差异 {len(diff)} 处，其中落在允许区外 {len(unexpected)} 处")
             if unexpected:
                 problems.append(f"有 {len(unexpected)} 字节被意外修改，前几个偏移 {unexpected[:8]}")
             else:
-                print("  影响面严格受限 ✓（仅 header 计数 / 新命令 / 签名 dataoff）")
+                print("  影响面严格受限 ✓（仅 header 计数 / 新命令 / 签名 datasize 置 0）")
 
         return report()
     finally:

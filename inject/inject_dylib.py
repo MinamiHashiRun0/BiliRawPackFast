@@ -104,11 +104,23 @@ class MachO:
         self.ncmds += 1
         self.sizeofcmds += cmdsize
         struct.pack_into("<II", self.data, 16, self.ncmds, self.sizeofcmds)
-        # 3) 代码签名 blob 在文件里后移了 cmdsize 字节 —— 必须同步 dataoff，
-        #    否则注入后签名的定位会错位（后续还要重签，但偏移错了会直接报坏签名）
+        # 3) 让原有代码签名失效：把 datasize 置 0，**不动 dataoff**。
+        #
+        # 这里踩过一个坑，写下来免得再犯：
+        #   最初写成 dataoff += cmdsize，理由是"后面的内容都后移了"。
+        #   那是错的 —— 本工具是「原地扩展 load command 区」：
+        #   新增的 72 字节占用的是 load command 区与首个 section 之间的空隙，
+        #   而签名 blob 位于文件**末尾**，文件总长度都没变，
+        #   它的文件偏移自然一点没动（实测：注入前后均指向 614,459,904 / +0）。
+        #   把 dataoff 改错会让签名元数据指向乱数据，
+        #   某些签名工具会因此判定包体损坏。
+        # 置 datasize=0 的效果：任何校验都会认为签名无效，
+        # 从而强制签名工具重新生成签名 —— 这正是我们要的。
+        # 尾部 blob 本体保持原样（读不到，但也不破坏结构），
+        # 其内容仍可用于查阅原始 entitlements。
         if self.code_sig:
             lc_off, dataoff, datasize = self.code_sig
-            struct.pack_into("<II", self.data, lc_off + 8, dataoff + cmdsize, datasize)
+            struct.pack_into("<II", self.data, lc_off + 8, dataoff, 0)
         return cmdsize
 
     def bytes(self) -> bytes:

@@ -44,7 +44,7 @@ static NSUInteger gDelivered = 0;
 static BOOL gFailed = NO;
 static NSString *gFailDetail = nil;
 
-/// 各段内容 = 段号重复填充，便于校验「第 i 段内容确实来自第 i 段」
+/// 段 k 覆盖文件偏移 [k*segSize, (k+1)*segSize)
 static BSSegmentRange segmentAtFactory(NSUInteger i, NSUInteger segSize) {
     BSSegmentRange r;
     r.offset = (uint64_t)i * segSize;
@@ -52,12 +52,20 @@ static BSSegmentRange segmentAtFactory(NSUInteger i, NSUInteger segSize) {
     return r;
 }
 
-static NSData *expectedSegment(NSUInteger i, NSUInteger segSize) {
-    NSMutableData *d = [NSMutableData dataWithLength:segSize];
+/// 夹具内容的唯一真相源：第 i 个字节 = i % 251（按字节位置编码，与分段方式无关）。
+/// serve_test_data.py 用同一个公式生成，两边独立计算、结果必须一致。
+static NSData *payloadRange(uint64_t offset, uint32_t size) {
+    NSMutableData *d = [NSMutableData dataWithLength:size];
     uint8_t *p = d.mutableBytes;
-    uint8_t v = (uint8_t)((i + 0xB1) & 0xFF);
-    memset(p, v, segSize);
+    for (uint32_t i = 0; i < size; i++) {
+        p[i] = (uint8_t)((offset + i) % 251);
+    }
     return d;
+}
+
+/// 各段期望内容 = 该段覆盖的字节范围
+static NSData *expectedSegment(NSUInteger i, NSUInteger segSize) {
+    return payloadRange((uint64_t)i * segSize, (uint32_t)segSize);
 }
 
 /// 跑一次拉取，返回是否成功
@@ -153,10 +161,12 @@ int main(int argc, char **argv) {
         runFetch(fileURL, @[hostOnly], 4, 20, 4096, 30, NULL);
 
         // ---- 2. 并发提速 ----
-        printf("\n[2] 并发提速：8 段 256KiB，并发 1 vs 8（服务端按连接限速）\n");
+        // 段长 128KiB、共 8 段（1MiB），服务端限速 256KiB/s/连接：
+        // 串行约 4s/段 × 8 = 32s，并发 8 约 4s，差异足够显著且不至于让 CI 等太久。
+        printf("\n[2] 并发提速：8 段 128KiB，并发 1 vs 8（服务端按连接限速）\n");
         NSTimeInterval t1 = 0, t8 = 0;
-        runFetch(fileURL, @[hostOnly], 1, 8, 262144, 120, &t1);
-        runFetch(fileURL, @[hostOnly], 8, 8, 262144, 120, &t8);
+        runFetch(fileURL, @[hostOnly], 1, 8, 131072, 120, &t1);
+        runFetch(fileURL, @[hostOnly], 8, 8, 131072, 120, &t8);
         printf("      并发1 = %.2fs   并发8 = %.2fs\n", t1, t8);
         if (t1 > 0 && t8 > 0) {
             double speedup = t1 / t8;

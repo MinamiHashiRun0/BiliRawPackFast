@@ -74,9 +74,11 @@ jobs:
       - name: Start throttled range server
         run: |
           set -euxo pipefail
-          python3 "$GITHUB_WORKSPACE/_recon/serve_test_data.py" 18080 "$RUNNER_TEMP/tdata" 8 262144 256 &
+          # 夹具只生成 8 段 × 128KiB = 1MiB：夹具配方已改为「按字节位置」编码，
+          # 与分段方式无关，因此测试里 4KiB / 128KiB 各种粒度都能从这一个文件里取。
+          # 限速 256 KiB/s/连接，测试用例按 128KiB 段跑，串行约 25s、并发 8 约 4s。
+          python3 "$GITHUB_WORKSPACE/_recon/serve_test_data.py" 18080 "$RUNNER_TEMP/tdata" 8 131072 256 &
           echo $! > "$RUNNER_TEMP/srv.pid"
-          # 等服务端把夹具写完并开始监听
           for i in $(seq 1 40); do
             if curl -fsS -r 0-15 -o /dev/null "http://127.0.0.1:18080/f.m4s"; then
               echo "服务就绪（第 $i 次尝试）"; break
@@ -84,11 +86,15 @@ jobs:
             sleep 0.5
           done
           ls -la "$RUNNER_TEMP/tdata/"
-          # 夹具大小必须与测试期望一致（8 段 × 256KiB）
-          EXPECT=$((8 * 262144))
+          EXPECT=$((8 * 131072))
           ACTUAL=$(stat -f%z "$RUNNER_TEMP/tdata/f.m4s")
           echo "夹具大小 $ACTUAL 期望 $EXPECT"
           [ "$ACTUAL" -eq "$EXPECT" ] || { echo "夹具大小不符"; exit 1; }
+
+      - name: Verify fixture recipe
+        run: |
+          set -euxo pipefail
+          python3 "$GITHUB_WORKSPACE/_recon/verify_fixture_recipe.py"
 
       - name: Compile and run fetcher test
         run: |
@@ -100,7 +106,6 @@ jobs:
                 -I. -o /tmp/test_segment_fetcher \
                 test_segment_fetcher.m BSSegmentFetcher.m BSSidxIndex.m BSSidxCore.c
           echo "编译通过"
-          # 测试内部有超时，万一卡住由 job 级 timeout 兜底
           /tmp/test_segment_fetcher "http://127.0.0.1:18080"
 
       - name: Stop server

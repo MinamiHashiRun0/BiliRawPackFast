@@ -94,16 +94,23 @@ def test_accept_with_gap():
     if name not in m2.dylibs:
         print(f"     ❌ 重新解析未找到 {name}，实际 {m2.dylibs}"); ok = False
 
-    # 3) 代码签名 dataoff 必须后移 added
+    # 3) 签名字段契约（**修正过一次，记下来**）：
+    #    dataoff 必须**不变**（新增命令占用的是 load command 区之后的空隙，
+    #      签名 blob 在文件末尾，文件长度都没变，它当然不动）；
+    #    datasize 必须被置 0（让原有签名失效，强制签名工具重签）。
+    #    最初这里断言 dataoff 后移 added，是错的 —— 那会把签名元数据指到乱数据上。
     off_sig_before = struct.unpack_from("<I", before, m.code_sig[0] + 8)[0]
     off_sig_after  = struct.unpack_from("<I", after, m.code_sig[0] + 8)[0]
-    if off_sig_after != off_sig_before + added:
-        print(f"     ❌ 签名 dataoff 未同步: {off_sig_before} → {off_sig_after}, 期望 +{added}"); ok = False
+    size_after     = struct.unpack_from("<I", after, m.code_sig[0] + 12)[0]
+    if off_sig_after != off_sig_before:
+        print(f"     ❌ 签名 dataoff 被改了: {off_sig_before} → {off_sig_after}（应不变）"); ok = False
+    if size_after != 0:
+        print(f"     ❌ 签名 datasize 未置 0（={size_after}）"); ok = False
 
-    # 4) 除了 [lc_end, lc_end+added) 与 header 12..20、签名命令 dataoff 之外，其余字节必须一模一样
+    # 4) 除了 [lc_end, lc_end+added) 与 header 计数、签名 datasize 之外，其余字节必须一模一样
     diff = [i for i in range(len(before)) if before[i] != after[i]]
     allowed = set(range(16, 24)) | set(range(m.lc_end, m.lc_end + added)) \
-              | set(range(m.code_sig[0] + 8, m.code_sig[0] + 12))
+              | set(range(m.code_sig[0] + 12, m.code_sig[0] + 16))
     unexpected = [i for i in diff if i not in allowed]
     if unexpected:
         print(f"     ❌ 有 {len(unexpected)} 字节被意外修改，前几个偏移: {unexpected[:8]}"); ok = False

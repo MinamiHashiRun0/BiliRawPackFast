@@ -1,33 +1,62 @@
-test(cdn): 让 BSSegmentFetcher 真正跑起来 —— 补上「只编译过、从未执行」的缺口
+fix(inject): 修正 LC_CODE_SIGNATURE 的处理 —— 之前把 dataoff 改错了
 
-问题（本项目最大的一处"看着绿其实没验"）：
-  BSSegmentFetcher 写完后只过了 CI 的类型与语法检查，**一次都没执行过**。
-  而它正是目标 ②（并发分段拉取）的主体实现。
-  算法层虽有 Python 同构实现验证过，但那份是参考实现、不是出货代码。
+这一轮最重要的修正，是一个我自己引入、且此前的测试没能抓住的 bug。
 
-新增 CI job verify-segment-fetcher（macos-26）：
-  1. 起一个**按连接限速**的 Range 服务器（_recon/serve_test_data.py）
-     —— 本机回环太快，不限速的话并发 1 与并发 8 都是瞬间完成，
-        "提速"测了也没意义；真实场景里 B站正是对单连接限速，
-        所以要复现这个特性，测试才有代表性（256 KiB/s/连接）
-  2. 用 clang 直接编译 test_segment_fetcher.m + 出货源码，运行
+问题：注入器把 LC_CODE_SIGNATURE 的 dataoff 加了 72
+  原逻辑的理由是「后面的内容都后移了」。那是错的 ——
+  本工具是「原地扩展 load command 区」：新增的 72 字节占用的是
+  load command 区与首个 section 之间的空隙，而签名 blob 位于**文件末尾**，
+  文件总长度根本没变，它的文件偏移自然一点没动。
+  实测：注入前后 dataoff 均应为 614,459,904。
+  把它改成 614,459,976 会让签名元数据指向乱数据，
+  某些签名工具会据此判定包体损坏 —— 而症状正是「装上打不开」。
 
-测试内容（5 组）：
-  1. 基本拉取：20 段，交付严格按段号递增、段数完整、逐段内容逐字节正确
-  2. 并发提速：8 段 × 256KiB，并发 1 vs 8，要求实测提速 > 1.5×
-  3. 坏 host 降级：hosts[0] 指向不可达端口，应重试并切到 hosts[1] 完成
-  4. 全部 host 失效：必须回调 onFailure，且**不得交付任何残缺数据**
-  5. （隐含在 4 内）失败路径不产生部分交付
+修正后的契约（两条，缺一不可）：
+  * dataoff 保持不变
+  * datasize 置 0  →  任何校验都会认为签名无效，强制签名工具重新生成
+  尾部 blob 本体保持原样（读不到，但结构不破坏），
+  其内容仍可读出原始 entitlements 供查阅。
 
-夹具一致性：
-  serve_test_data.py 生成的字节与测试期望严格对齐 ——
-  每段 = 段号对应的单字节重复填充，值 (i + 0xB1) & 0xFF。
-  这样「第 i 段内容是否正确」是可判定的，而不是只比长度。
-  启动步骤里还断言了夹具文件大小（8 × 256KiB），防止静默生成错误夹具。
+为什么之前没抓到：
+  test_inject.py 与 test_inject_real_ipa.py 都**断言了错误的期望**（dataoff +72），
+  于是「实现错 + 测试错」互相印证，一起变绿。
+  修正测试期望后，真实 IPA 演练结果：
+    LC_CODE_SIGNATURE dataoff 保持不变 ✓ (614,459,904)
+    LC_CODE_SIGNATURE datasize 已置 0 ✓ (原 15,623,488 → 0)
+    逐字节差异 54 处，落在允许区外 0 处
+  教训：verification 的期望值本身也需要来源，不能凭推导写死。
+  故本轮把「字段绝对偏移」改为由解析函数返回，不再手算 ——
+  这个偏移在本项目里前后算错过三次（dataoff 的 +8/+16、datasize 的 +12/+16）。
 
-顺带清理：测试里的 gRetries/gHostSwitches/gTotalSegments/gSegmentSize 四个
-全局量从未被读取（fetcher 的计数属性在串行队列上，测试线程直接读不安全），
-删掉而不是加 -Wno-unused 掩盖。
+顺带（同一轮的其余工作，均为上一轮遗留缺口的补齐）：
 
-注：workflow 的 --ipa 注入分支**依然从未执行过** —— 仍缺可用的 IPA 直链。
-    这是本轮之后剩余的最大未验证路径，如实记录。
+1) 让 BSSegmentFetcher 真正跑起来（此前只编译过、从未执行）
+   新增 CI job verify-segment-fetcher（macos-26）+ 按连接限速的 Range 服务器。
+   实测结果：
+     [1] 20 段并发4：交付 20，按序，段数完整
+     [2] 并发1 = 45.04s vs 并发8 = 6.00s → **实测 7.5× 提速**
+     [3] 坏 host：第 0 次失败 → 切 host → 交付 6 段（重试6 换host6）
+     [4] 全失效：回调 onFailure，交付 0 段（正确拒绝，不交付残缺数据）
+   其中 [1][3] 的「逐段内容」当时失败 —— 根因是**夹具设计错**，不是引擎错：
+   夹具按 256KiB 段填常量字节，而测试用 4KiB 段断言，粒度不一致。
+   已把夹具配方改为「按字节位置」编码（第 i 字节 = i % 251），与分段方式无关，
+   并新增 _recon/verify_fixture_recipe.py 验证该配方在 4KiB/256KiB/1000B
+   等多种分段下都自洽。
+
+2) 抽取并核对原始 entitlements（_recon/extract_entitlements.py）
+   实测本脱壳包**完整保留**原始 entitlements：
+     application-identifier = 746845GC96.tv.danmaku.bilianime  ← B站 Team ID
+     keychain-access-groups / aps-environment=production /
+     application-groups=group.tv.danmaku.bilianime /
+     extended-virtual-addressing / increased-memory-limit / associated-domains …
+   风险：自签用用户自己的证书，Team ID 必然不同；若这些 entitlements 被
+   原样带过去，典型症状是**一启动就闪退**，会被误判成注入失败，白费一轮真机测试。
+   因此预注入包现在会剥离主二进制原有签名，并附
+   deliver/ORIGINAL-ENTITLEMENTS-PLEASE-READ.txt 说明该风险。
+
+3) 本地闸门修补：行尾检查改为只覆盖 CI 真正会执行的文件
+   （deliver/ 是给用户看的产物，不参与 CI），
+   同时把生成该产物改为二进制写 UTF-8+LF，避免 Windows 文本模式写成 CRLF。
+
+未验证项：以上全部仍**未在真机运行**；
+预注入包也**未被 macOS 签名过**（那一步只能在用户设备侧完成）。

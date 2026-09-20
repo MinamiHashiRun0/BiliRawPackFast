@@ -1,0 +1,35 @@
+{
+  "ipa": "哔哩哔哩-弹幕番剧直播高清视频_9.12.0.ipa",
+  "exe_size": 630083392,
+  "code_signature": {
+    "offset": 614459904,
+    "size": 15623488
+  },
+  "slots_present": [
+    0,
+    2,
+    5,
+    7,
+    4096,
+    65536
+  ],
+  "entitlements": {
+    "com.apple.developer.usernotifications.communication": "True",
+    "com.apple.developer.networking.multicast": "True",
+    "application-identifier": "746845GC96.tv.danmaku.bilianime",
+    "aps-environment": "production",
+    "com.apple.developer.usernotifications.time-sensitive": "True",
+    "com.apple.developer.associated-domains": "['applinks:bangumi.bilibili.com', 'applinks:live.bilibili.com', 'applinks:www.bilibili.com', 'applinks:m.bilibili.com', 'applinks:space.bilibili.com', 'applinks:search.bilibili.com', 'applinks:d.bilibili.com', 'applinks:mall.bilibili.com', 'applinks:app.biligame.com', 'applinks:h.bilibili.com', 'applinks:miniapp.bilibili.com', 'applinks:bml.bilibili.com', 'applinks:bw.bilibili.com', 'applinks:b23.tv', 'applinks:bili2233.cn', 'applinks:bili23.cn', 'applinks:bili33.cn', 'applinks:bili22.cn', 'applinks:t.bilibili.com', 'applinks:cm.bilibili.com']",
+    "com.apple.developer.siri": "True",
+    "com.apple.developer.applesignin": "['Default']",
+    "com.apple.developer.kernel.extended-virtual-addressing": "True",
+    "com.apple.developer.kernel.increased-memory-limit": "True",
+    "keychain-access-groups": "['746845GC96.tv.danmaku.bilianime']",
+    "com.apple.security.application-groups": "['group.tv.danmaku.bilianime']"
+  },
+  "code_directory": {
+    "version": 132352,
+    "flags": "0x0",
+    "identifier": "tv.danmaku.bilianime"
+  }
+}
