@@ -1,24 +1,16 @@
-fix(ci): 修 workflow YAML 解析失败 + 改用原始 entitlements
+fix(build): Makefile 注释写成 // 导致 make 报 missing separator
 
-问题：GitHub 把 workflow name 显示成文件路径、workflow_dispatch 未注册、
-push 触发的 run 0 秒即失败 —— 说明 workflow 根本没编译成功。
+CI 日志: inject/probe/Makefile:1: *** missing separator.  Stop.
+根因: Makefile 第 1 行起用了 C 风格 // 注释，Make 只认 #，
+      解析器把它当成畸形规则行直接报错。
 
-根因（本地用 PyYAML 定位到行号）：
-  块标量 run: | 里嵌的 bash heredoc，正文被写在第 0 列，
-  直接终止了 YAML 块标量；而结束标记 EOF 却是缩进的，两头都不对。
-  第一次在 dist/README.txt（第 103 行），第二次在 ent.plist（第 166 行）。
+修复: 全部注释改为 #。
 
-修复：
-  * README 输出改写为花括号分组 + 逐行 echo，不再用 heredoc
-  * entitlements 不再硬编码最小集合，改为
-    `codesign -d --entitlements :- <主二进制>` 从原 App Store 签名里抽原始值，
-    抽不到才回退最小集合。比硬编码更正确：能保留 B站原本申请的权限。
+顺带补 _recon/preflight.py —— 推送前的本地闸门，把能在 Windows 上
+验掉的东西全部验掉，不再拿 macOS CI 额度试语法：
+  1. workflow YAML 可解析 / 无 secrets-in-if / heredoc 闭合 / artifact 不静默
+  2. Makefile 无 // 注释、recipe 行必须 TAB、关键变量齐全
+  3. 将进 CI 的文本文件必须 LF 行尾（CRLF 会让 macOS 上 bash 报坏解释器）
+  4. Python 文件语法可编译
 
-附带：
-  * 显式写 "on":（避免 YAML 把 on 解析成布尔 true 的歧义）
-  * 新增 _recon/validate_workflow.py 作为推送前本地校验闸门
-    （检查 secrets 出现在 if、空 run、heredoc 平衡、artifact 静默失败）
-  * push 触发时忽略 _recon/**，避免侦察脚本改动就触发 macOS 构建
-
-验证：本地 PyYAML 解析通过，11 个步骤全部识别，无 secrets-in-if、
-无未闭合 heredoc、所有 upload-artifact 均设 if-no-files-found=error。
+本轮 preflight 全部通过后才推送。
