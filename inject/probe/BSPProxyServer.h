@@ -8,10 +8,10 @@
  *
  * 代理行为：
  *   1. 收到 GET，解析出原始 CDN URL 与 Range
- *   2. 把 Range 切成 CHUNK 大小的分片，用 BSPMSPlanner 按评分+令牌桶分派到多个 CDN host
+ *   2. 把 Range 切成 CHUNK 大小的分片，用 BSPMSPlanner 按「实测速度 + 在途数」
+ *      评分派发到多个 CDN host
  *   3. 并发用 NSURLSession 拉取，按序写回给客户端（顺序保证，内存窗口受控）
- *   4. 每个 host 的令牌桶速率用 AIMD 自适应：跑得比上限快就抬，失败就砍
- *   5. 3 次失败即拉黑该 host；首片失败/超时则整体 302 回原始 URL（fail-open，不砸播放）
+ *   4. 3 次失败即拉黑该 host；首片超时或全挂则 302 回原始 URL（fail-open，不砸播放）
  */
 #import <Foundation/Foundation.h>
 

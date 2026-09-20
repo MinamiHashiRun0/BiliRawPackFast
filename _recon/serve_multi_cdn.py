@@ -37,6 +37,34 @@ def make_body(size):
     return (pattern * (size // 256 + 1))[:size]
 
 
+class Bucket:
+    """每台服务器**聚合**令牌桶。
+
+    为什么不是「按连接限速」：第一版按连接限速，结果代理对同一台服务器开 3 条
+    并发连接就拿到 3 MiB/s，测试于是报出 10.95x 的假提速。真实的 CDN 限的是
+    「这个账号/这条链路的总量」，所以在服务端做聚合限速才是有意义的模型。
+    """
+
+    def __init__(self, rate, burst):
+        self.rate = float(rate)
+        self.burst = float(burst)
+        self.tokens = float(burst)
+        self.last = time.monotonic()
+        self.lock = threading.Lock()
+
+    def take(self, n):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate)
+                self.last = now
+                if self.tokens >= n:
+                    self.tokens -= n
+                    return
+                need = (n - self.tokens) / self.rate
+            time.sleep(min(need, 0.02))
+
+
 def make_handler():
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -81,19 +109,15 @@ def make_handler():
                 self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, SIZE))
             self.end_headers()
 
-            # 按 RATE 字节/秒限速（每连接独立）
             chunk = 16384
             sent = 0
-            t0 = time.monotonic()
+            bucket = self.server.bucket
             try:
                 while sent < length:
                     n = min(chunk, length - sent)
+                    bucket.take(n)                 # 聚合限速：所有连接共用
                     self.wfile.write(BODY[start + sent:start + sent + n])
                     sent += n
-                    target = t0 + sent / RATE
-                    now = time.monotonic()
-                    if target > now:
-                        time.sleep(target - now)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -124,9 +148,13 @@ def main():
     servers = []
     for i in range(n):
         # 在主线程完成 bind+listen，保证「起完线程」就等于「端口可连」
-        servers.append(Server(("127.0.0.1", base_port + i), Handler))
+        srv = Server(("127.0.0.1", base_port + i), Handler)
+        # 桶深只给 0.25 秒的量：够吃掉突发，但不至于让短文件整个跑在初始令牌里
+        # （第一版按连接限速 + 默认桶深，6 MiB 全在初始令牌里跑完，报出假的 10.95x）
+        srv.bucket = Bucket(RATE, RATE * 0.25)
+        servers.append(srv)
 
-    print("fixture %d bytes, rate %.0f B/s/conn, servers %d..%d"
+    print("fixture %d bytes, aggregate %.0f B/s/server (shared across conns), servers %d..%d"
           % (SIZE, RATE, base_port, base_port + n - 1), flush=True)
 
     for srv in servers:

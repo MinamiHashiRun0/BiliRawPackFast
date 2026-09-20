@@ -74,7 +74,7 @@ static BOOL gMediaCheckDisabled = NO;
 + (void)setMediaCheckDisabled:(BOOL)disabled          { gMediaCheckDisabled = disabled; }
 
 /* hostSpec 允许带端口（"127.0.0.1:18081"），测试用；生产里都是纯域名 */
-static void bsp_split_host(const NSString *spec, NSString **outHost, NSNumber **outPort)
+static void bsp_split_host(NSString *spec, NSString **outHost, NSNumber **outPort)
 {
     NSRange colon = [spec rangeOfString:@":" options:NSBackwardsSearch];
     if (colon.location != NSNotFound && colon.location > 0 &&

@@ -153,8 +153,9 @@ jobs:
       - name: Start fake multi-CDN servers
         run: |
           set -euxo pipefail
-          # 4 条上游，各 1 MiB/s，夹具 6 MiB
-          python3 "$GITHUB_WORKSPACE/_recon/serve_multi_cdn.py" 18081 4 6291456 1048576 \
+          # 4 条上游，每台聚合 1 MiB/s（不是按连接！），夹具 12 MiB。
+          # 夹具要足够大，否则整个传输跑在初始令牌/突发里，会报出假的提速比。
+          python3 "$GITHUB_WORKSPACE/_recon/serve_multi_cdn.py" 18081 4 12582912 1048576 \
             > "$RUNNER_TEMP/cdn.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/cdn.pid"
           for i in $(seq 1 60); do
@@ -176,7 +177,7 @@ jobs:
                 -I. -o /tmp/test_proxy_e2e \
                 test_proxy_e2e.m BSPProxyServer.m BSPCdnPool.m BSPDynamicHook.m bsp_ms_core.c
           echo "编译通过"
-          /tmp/test_proxy_e2e 18081 4 6291456
+          /tmp/test_proxy_e2e 18081 4 12582912
 
       - name: Stop servers
         if: always()

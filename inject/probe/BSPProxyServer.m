@@ -17,13 +17,24 @@
 /* ------------------------------------------------------------------ */
 static const int64_t  kChunkBytes        = 256 * 1024;
 static const NSInteger kWindow           = 12;
-static const double   kInitialHostCap    = 2.0 * 1024 * 1024;
-static const double   kMinHostCap        = 256 * 1024;
-static const double   kMaxHostCap        = 24.0 * 1024 * 1024;
 static const NSInteger kBlacklistErrors  = 3;
-static const double   kFirstChunkTimeout = 2.5;
+static const double   kFirstChunkTimeout = 4.0;   /* 首片超过这么久就 fail-open 回源 */
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
 static const int      kRecvTimeoutSec    = 15;
+
+/* 每主机令牌桶上限：0 = 不限速。
+ *
+ * 为什么默认关掉（记录一轮失败设计，避免以后又加回来）：
+ *   最初想用「每主机令牌桶 + AIMD 自适应」来建模 CDN 的账户级限速。
+ *   但 AIMD 在这里有个死结：我们对一台 CDN 并发 3 个分片时，单个分片的实测
+ *   速率天然只有该 CDN 总能力的 1/3，AIMD 会据此判定「这台很慢」并下调上限
+ *   —— 于是上限本身变成了瓶颈，越调越慢。而想上调又必须先把速率用满，
+ *   用不满就发现不了余量。
+ *   真正负责「别把鸡蛋放一个篮子」的是评分里的 load_factor = 1/(1+active*0.1)：
+ *   窗口 12 个分片会被它自然摊到各主机上（单测 [5a] 已固定这一行为）。
+ *   所以这里保持不限速，让调度完全由「实测速度 + 在途数」驱动。
+ *   令牌桶机制本身保留在 bsp_ms_core 里并被单测覆盖，将来若要启用再说。 */
+static const double   kPerHostCapBps     = 0.0;
 
 static double bsp_now(void) { return [NSDate timeIntervalSinceReferenceDate]; }
 
@@ -260,7 +271,7 @@ static NSSet *kDropReqHeaders(void)
     for (NSUInteger i = 0; i < all.count; i++) _hostIndex[all[i]] = @(i);
 
     if (_planner) { bsp_ms_destroy(_planner); _planner = NULL; }
-    _planner = bsp_ms_create((int)all.count, kInitialHostCap, kInitialHostCap);
+    _planner = bsp_ms_create((int)all.count, kPerHostCapBps, kPerHostCapBps);
     for (NSUInteger i = 0; i < all.count; i++)
         bsp_ms_set_host_name(_planner, (int)i, all[i].UTF8String);
 }
@@ -723,7 +734,6 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             }
 
             [self noteHost:host bytes:(int64_t)data.length seconds:dt ok:YES];
-            [self adaptiveCapForHost:host bytes:(int64_t)data.length seconds:dt];
 
             if (wc.total < 0 && hr) {
                 NSString *cr = hr.allHeaderFields[@"Content-Range"];
@@ -811,30 +821,6 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         BSPProxyHostStat *s = [self statFor:host];
         if (ok) { s.bytes += bytes; s.seconds += dt; s.ok++; s.consecutiveErrors = 0; }
         else    { s.fail++; s.consecutiveErrors++; }
-    }
-    [_lock unlock];
-}
-
-- (void)adaptiveCapForHost:(NSString *)host bytes:(int64_t)bytes seconds:(double)dt
-{
-    [_lock lock];
-    {
-        NSNumber *n = _hostIndex[host];
-        int idx = n ? n.intValue : -1;
-        double cap, observed;
-        if (idx >= 0 && dt > 0.001) {
-            cap = bsp_ms_cap(_planner, idx);
-            if (cap > 0) {
-                observed = (double)bytes / dt;
-                if (observed > cap * 1.2) {
-                    double nc = cap * 1.5;
-                    bsp_ms_set_cap(_planner, idx, nc > kMaxHostCap ? kMaxHostCap : nc);
-                } else if (observed < cap * 0.5 && cap > kMinHostCap) {
-                    double nc = cap * 0.8;
-                    bsp_ms_set_cap(_planner, idx, nc < kMinHostCap ? kMinHostCap : nc);
-                }
-            }
-        }
     }
     [_lock unlock];
 }

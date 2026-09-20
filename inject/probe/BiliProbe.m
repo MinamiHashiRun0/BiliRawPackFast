@@ -1668,8 +1668,11 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
 //      签名猜错就会按错误布局读参数。现在 encoding 由真机 classes.txt 给出，
 //      且安装前会用 expectShapes 再校验一次参数形状，不符就拒绝安装。
 //   B. 回环 HTTP 代理（BSPProxyServer）：把 Range 切成 256 KiB 分片，
-//      按 stormdl 的评分 + 每主机令牌桶并发派发到多个 CDN host，
-//      按序写回；每主机速率用 AIMD 自适应；首片超时或全挂则 302 回源（fail-open）。
+//      按「实测速度 + 在途数」评分并发派发到多个 CDN host，按序写回；
+//      3 次失败的节点拉黑；首片超时或全挂则 302 回源（fail-open）。
+//      （曾尝试「每主机令牌桶 + AIMD 自适应」，但它会因为我们主动对一台 CDN
+//        并发多分片、单分片实测速率偏低而误判「这台慢」并下调上限，自锁成瓶颈。
+//        现在每主机不限速，靠评分里的 load_factor 自然摊开，见 BSPProxyServer.m。）
 //
 // 关闭开关：往 {Documents}/biliprobe/mode.txt 写 direct 即可完全不改写。
 
