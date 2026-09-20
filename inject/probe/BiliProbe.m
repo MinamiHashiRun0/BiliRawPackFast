@@ -152,6 +152,27 @@ static BOOL ProbeAddMethodIfAbsent(Class cls, SEL sel, IMP imp, const char *type
     return class_addMethod(cls, sel, imp, types);
 }
 
+/// 直接把某个方法的实现换成 C 函数，并把原 IMP 交给调用方保存。
+/// 相比 method_exchangeImplementations + 分类的写法，这里不需要在 ObjC 侧
+/// 声明 probe_ 选择子，因此不会出现「在 C 函数里对 id 调未声明选择子」的编译错误；
+/// 也不再依赖 ARC 生成 thunk。原实现通过保存下来的 IMP 转发，不可能递归。
+static IMP ProbeReplaceMethod(Class cls, SEL sel, IMP newImp, const char *types) {
+    if (!cls) {
+        PLog(@"hook", @"✗ class 为 nil，跳过 %@", NSStringFromSelector(sel));
+        return NULL;
+    }
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        PLog(@"hook", @"✗ %@ 上 %@ 不存在，跳过",
+             NSStringFromClass(cls), NSStringFromSelector(sel));
+        return NULL;
+    }
+    IMP old = method_getImplementation(m);
+    class_replaceMethod(cls, sel, newImp, types);
+    PLog(@"hook", @"✓ 已替换 %@ :: %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+    return old;
+}
+
 //------------------------------------------------------------------------------
 #pragma mark - 探针
 //------------------------------------------------------------------------------
@@ -166,6 +187,9 @@ static BOOL ProbeAddMethodIfAbsent(Class cls, SEL sel, IMP imp, const char *type
 // 视频字节从这里流经 App 自己的 delegate（B站靠它塞 PCDN/MCDN）。
 // 观测 delegate 身份 + 在 delegate 类上挂观测点 ≠ 改写行为。
 
+/// AVAssetResourceLoader 原始 setDelegate:queue: 的 IMP（bootstrap 时抓取）
+static IMP gOrigSetRLDelegate = NULL;
+
 static void ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue) {
     PLog(@"resloader", @"setDelegate:queue: → delegate=%@ queue=%s",
          delegate ? NSStringFromClass([delegate class]) : @"(nil)",
@@ -174,9 +198,16 @@ static void ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispa
     if (delegate) {
         [BiliProbe probe_installDelegateHooksOnClass:[delegate class]];
     }
-    // self 是 AVAssetResourceLoader；原始实现已被换到 probe_ 选择子上，
-    // 但它只做记录 + 转发，所以这里调 probe_ 即等于调原始实现。
-    [self probe_setDelegate:delegate queue:queue];
+
+    // 直接调原始 IMP，而不是调 probe_setDelegate:queue: ——
+    // 这里 self 是 id，编译器看不到后面分类里声明的选择子，会报
+    // "no known instance method for selector"。
+    // 用抓下来的 IMP 同时还保证了逻辑上不可能递归：它就是原实现本身。
+    if (gOrigSetRLDelegate) {
+        ((void (*)(id, SEL, id, dispatch_queue_t))gOrigSetRLDelegate)(self, _cmd, delegate, queue);
+    } else {
+        PLog(@"resloader", @"⚠️ 未抓到原始 IMP，本次不转发（delegate 可能未生效）");
+    }
 }
 
 static BOOL ProbeShouldWaitForLoading(id self, SEL _cmd,
@@ -534,10 +565,8 @@ static void ProbeLogEnvironment(void) {
         // ① AVAssetResourceLoader：视频链路的咽喉
         Class rl = NSClassFromString(@"AVAssetResourceLoader");
         if (rl) {
-            // 给 AVAssetResourceLoader 自己加 probe_ 实现再交换（它没有子类分派问题）
-            ProbeAddMethodIfAbsent(rl, @selector(probe_setDelegate:queue:),
-                                   (IMP)ProbeSetResourceLoaderDelegate, "v@:@@");
-            ProbeSwizzle(rl, @selector(setDelegate:queue:), @selector(probe_setDelegate:queue:));
+            gOrigSetRLDelegate = ProbeReplaceMethod(rl, @selector(setDelegate:queue:),
+                                                    (IMP)ProbeSetResourceLoaderDelegate, "v@:@@");
         } else {
             PLog(@"hook", @"✗ AVAssetResourceLoader 不在运行时");
         }
@@ -561,20 +590,6 @@ static void ProbeLogEnvironment(void) {
     }
 }
 
-@end
-
-//------------------------------------------------------------------------------
-#pragma mark - 分类：把 probe 选择子挂到系统类上
-//------------------------------------------------------------------------------
-@interface AVAssetResourceLoader (BiliProbe)
-- (void)probe_setDelegate:(id)delegate queue:(dispatch_queue_t)queue;
-@end
-
-@implementation AVAssetResourceLoader (BiliProbe)
-- (void)probe_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    // 交换后本方法体 = 原始实现；由 ProbeSetResourceLoaderDelegate 转发进来
-    ProbeSetResourceLoaderDelegate(self, _cmd, delegate, queue);
-}
 @end
 
 //------------------------------------------------------------------------------

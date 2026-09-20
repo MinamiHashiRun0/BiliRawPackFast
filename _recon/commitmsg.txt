@@ -1,16 +1,23 @@
-fix(build): Makefile 注释写成 // 导致 make 报 missing separator
+fix(probe): 修编译错误 —— 在 C 函数里对 id 调用了未声明的 probe_ 选择子
 
-CI 日志: inject/probe/Makefile:1: *** missing separator.  Stop.
-根因: Makefile 第 1 行起用了 C 风格 // 注释，Make 只认 #，
-      解析器把它当成畸形规则行直接报错。
+CI 日志: BiliProbe.m:179:11: error: no known instance method for selector
+        'probe_setDelegate:queue:'
 
-修复: 全部注释改为 #。
+根因（两层）：
+  1. ProbeSetResourceLoaderDelegate 是 C 函数，参数 self 是 id。
+     分类 @implementation AVAssetResourceLoader (BiliProbe) 里声明的
+     probe_setDelegate:queue: 是绑在具体类上的，对 id 不可见；
+     而分类又写在文件末尾，编译器此时也还没看到。
+  2. 原写法（在分类里调 ProbeSetResourceLoaderDelegate 转发）本身是绕的：
+     ARC 会为分类方法生成 thunk，多一层不必要的间接。
 
-顺带补 _recon/preflight.py —— 推送前的本地闸门，把能在 Windows 上
-验掉的东西全部验掉，不再拿 macOS CI 额度试语法：
-  1. workflow YAML 可解析 / 无 secrets-in-if / heredoc 闭合 / artifact 不静默
-  2. Makefile 无 // 注释、recipe 行必须 TAB、关键变量齐全
-  3. 将进 CI 的文本文件必须 LF 行尾（CRLF 会让 macOS 上 bash 报坏解释器）
-  4. Python 文件语法可编译
+修复：改用 class_replaceMethod + 保存原 IMP。
+  新增 ProbeReplaceMethod(cls, sel, newImp, types) 返回原 IMP，
+  ProbeSetResourceLoaderDelegate 直接调保存下来的 IMP 转发。
+  这样：
+    * 不需要在 ObjC 侧声明任何 probe_ 选择子 → 编译错误消失
+    * 不依赖 ARC 的 thunk 生成
+    * 逻辑上不可能递归：转发用的就是原实现本身
+  随之删除 AVAssetResourceLoader 的整个分类。
 
-本轮 preflight 全部通过后才推送。
+另修正注释中已失效的「见下方分类」指引。
