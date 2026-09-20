@@ -626,74 +626,97 @@ static void ProbePreloadItems(id self, SEL _cmd, id items, BOOL unite) {
     }
 }
 
-/// 列出目录内容（只读、限深度与条数，避免大目录卡住）
-static void ProbeListDir(NSString *path, NSString *label, int maxEntries) {
+/// 逐层统计：对 root 下每个一级子目录递归求和并计数，输出 Top N。
+/// 上一次盘点只看了顶层，结果 636MB 的 Library 里装了什么完全看不到；
+/// 这次递归下去，直接定位视频缓存在哪个子目录。
+static void ProbeScanTree(NSString *root, NSString *label, int topN) {
     NSFileManager *fm = NSFileManager.defaultManager;
     BOOL isDir = NO;
-    if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
-        PLog(@"cache", @"%@ 不存在: %@", label, path);
-        return;
-    }
-    if (!isDir) {
-        NSDictionary *a = [fm attributesOfItemAtPath:path error:NULL];
-        PLog(@"cache", @"%@ (文件) %llu 字节: %@", label,
-             [a[NSFileSize] unsignedLongLongValue], path);
+    if (![fm fileExistsAtPath:root isDirectory:&isDir] || !isDir) {
+        PLog(@"cache", @"%@ 不存在或非目录: %@", label, root);
         return;
     }
     NSError *err = nil;
-    NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:path error:&err];
+    NSArray<NSString *> *subs = [fm contentsOfDirectoryAtPath:root error:&err];
     if (err) { PLog(@"cache", @"%@ 列举失败: %@", label, err.localizedDescription); return; }
-    unsigned long long total = 0;
-    NSUInteger n = 0;
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    for (NSString *name in items) {
-        if (n++ >= (NSUInteger)maxEntries) { [lines addObject:@"  …(截断)"]; break; }
-        NSString *full = [path stringByAppendingPathComponent:name];
+
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    for (NSString *name in subs) {
+        NSString *full = [root stringByAppendingPathComponent:name];
         BOOL sub = NO;
         [fm fileExistsAtPath:full isDirectory:&sub];
+        unsigned long long bytes = 0;
+        NSUInteger files = 0;
         if (sub) {
-            // 子目录只算体积
             NSDirectoryEnumerator *e = [fm enumeratorAtPath:full];
-            unsigned long long sz = 0; NSString *f2;
-            while ((f2 = [e nextObject])) {
+            NSString *rel;
+            while ((rel = [e nextObject])) {
                 NSDictionary *a = [e fileAttributes];
-                sz += [a[NSFileSize] unsignedLongLongValue];
+                if ([a[NSFileType] isEqual:NSFileTypeDirectory]) continue;
+                bytes += [a[NSFileSize] unsignedLongLongValue];
+                files++;
             }
-            total += sz;
-            [lines addObject:[NSString stringWithFormat:@"  [目录] %-42@ %10llu 字节",
-                              name, sz]];
         } else {
             NSDictionary *a = [fm attributesOfItemAtPath:full error:NULL];
-            unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
-            total += sz;
-            [lines addObject:[NSString stringWithFormat:@"  [文件] %-42@ %10llu 字节",
-                              name, sz]];
+            bytes = [a[NSFileSize] unsignedLongLongValue];
+            files = 1;
         }
+        [rows addObject:@{@"name": name, @"bytes": @(bytes), @"files": @(files), @"dir": @(sub)}];
     }
-    PLog(@"cache", @"===== %@ =====\n 路径: %@\n 合计 %llu 字节（%.2f MB），%lu 项\n%@",
-         label, path, total, (double)total / 1048576.0, (unsigned long)items.count,
-         [lines componentsJoinedByString:@"\n"]);
+    [rows sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [b[@"bytes"] compare:a[@"bytes"]];
+    }];
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"===== %@ =====\n 路径: %@\n", label, root];
+    unsigned long long grand = 0;
+    for (NSDictionary *r in rows) grand += [r[@"bytes"] unsignedLongLongValue];
+    [out appendFormat:@" 合计 %.2f MB，%lu 个一级项\n", (double)grand / 1048576.0,
+                      (unsigned long)rows.count];
+    NSUInteger shown = 0;
+    for (NSDictionary *r in rows) {
+        if (shown++ >= (NSUInteger)topN) { [out appendString:@"  …\n"]; break; }
+        [out appendFormat:@"  %@ %-40@ %12llu 字节  %lu 个文件\n",
+                          [r[@"dir"] boolValue] ? @"[目录]" : @"[文件]",
+                          r[@"name"],
+                          [r[@"bytes"] unsignedLongLongValue],
+                          (unsigned long)[r[@"files"] unsignedIntegerValue]];
+    }
+    PLog(@"cache", @"%@", out);
 }
 
-/// 盘点与视频缓存有关的目录
+/// 盘点与视频缓存有关的目录（用官方 API 取路径，不再猜）
 static void ProbeDumpCaches(void) {
     @autoreleasepool {
+        NSFileManager *fm = NSFileManager.defaultManager;
+
+        // 1) 官方 API 拿 Caches —— 上一版手工拼路径，拼错了两层，结果什么都没看到
+        NSArray<NSString *> *cacheDirs =
+            NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        NSString *caches = cacheDirs.firstObject;
+
         NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *doc = docs.firstObject ?: @"";
-        NSString *lib = [doc stringByDeletingLastPathComponent];       // …/Library
-        NSString *caches = [lib stringByAppendingPathComponent:@"Caches"];
+        NSString *lib = [doc stringByDeletingLastPathComponent];
+        NSString *container = [lib stringByDeletingLastPathComponent];
 
-        ProbeListDir(lib, @"Library", 40);
-        ProbeListDir(caches, @"Library/Caches", 60);
-        // 常见视频缓存目录名，逐个探测
-        for (NSString *sub in @[@"Caches/video", @"Caches/VideoCache", @"Caches/Player",
-                                @"Caches/com.bilibili.video", @"Caches/bilibili",
-                                @"Caches/MediaCache", @"Caches/BFCPlayer"]) {
-            NSString *p = [lib stringByAppendingPathComponent:sub];
-            if ([NSFileManager.defaultManager fileExistsAtPath:p]) {
-                ProbeListDir(p, [@"Library/" stringByAppendingString:sub], 60);
+        PLog(@"cache", @"路径：container=%@  library=%@  caches=%@", container, lib, caches);
+
+        // 2) Library 下逐层统计（636MB 在哪一目了然）
+        ProbeScanTree(lib, @"Library 下各一级项", 20);
+        // 3) Caches 再往下钻一层
+        if (caches.length) {
+            ProbeScanTree(caches, @"Caches 下各一级项", 25);
+            for (NSString *name in [fm contentsOfDirectoryAtPath:caches error:NULL]) {
+                NSString *p = [caches stringByAppendingPathComponent:name];
+                BOOL sub = NO;
+                [fm fileExistsAtPath:p isDirectory:&sub];
+                if (sub) ProbeScanTree(p, [@"Caches/" stringByAppendingString:name], 15);
             }
         }
+        // 4) Documents 也看一眼（部分实现把缓存放这）
+        ProbeScanTree(doc, @"Documents 下各一级项", 15);
+
         PLog(@"cache", @"缓存盘点完成");
     }
 }

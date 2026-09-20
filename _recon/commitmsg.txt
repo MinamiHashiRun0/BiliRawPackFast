@@ -1,24 +1,24 @@
-feat(probe): 加缓存盘点 + 预加载观测点 —— 追查"视频在播但零网络流量"
+fix(probe): 缓存盘点改为递归逐层统计 —— 上一版路径拼错、只看一层
 
-真机事实（第四次会话，横屏视频，用户确认"点了视频、看到画面在动、听了 65 秒"）：
-  02:29:53 起，心跳 1→5（15s→75s）计数完全冻结：
-    委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=10
-    | 下载器init=0 段级下载=0 | AVURLAsset=1 加载器类=0
-  唯一命中的 [asset] 是占位视频：file:///…/bili-universal.app/blank.mp4
-  （我一度把它当成"视频走本地文件"，那条判断是错的，已在对话中更正）
-  → 真在播的视频，对全部网络层观测点是零流量。
+真机（第五次会话，构建 15db232）实测：
+  [cache] Library 合计 680,977,230 字节（649.43 MB）
+            [目录] Library   636,542,957 字节   ← 视频缓存极可能在这里
+            [目录] Documents  30,434,788 字节
+            [目录] tmp        13,999,485 字节
+  [cache] Library/Caches 不存在: …/<container>/Caches   ← 路径拼错两层
 
-新假设：视频在点进去之前已被**预下载**，播放读本地缓存，因此任何网络层 hook
-都不会触发。若成立，注入点必须上移到预加载/下载层。
+  同时 AVURLAsset=0（上一轮为 1，是 blank.mp4 占位），
+  预加载=0，全部网络计数与上轮相同（NSURLSession=1 NSURLRequest=10 均为启动 API）。
+  需用户确认这次是否真的点进了播放页。
 
-依据（来自 classes.txt 真实方法表）：
-  BBPlayerPreload  + keyWithOid:cid:      - preloadItems:unite:
-  BBPlayerInteractiveResourcePreload  - downloadWithUrl:savedPath:relativePath:
-  BBPlayerItemCache 只是 NSCache 语义（缓存 playerItem **对象**），不含视频字节
+修复：
+  * 用 NSSearchPathForDirectoriesInDomains(NSCachesDirectory…) 取 Caches 路径，
+    不再手工拼接（上一版拼错两层，等于什么都没看到）
+  * 新增 ProbeScanTree()：对每个一级子项**递归**求和 + 文件计数，按体积排序输出 Top N
+  * 盘点范围：Library 一级、Caches 一级、Caches 下每个子目录各一层、Documents 一级
+    —— 636MB 到底装在哪，这次会直接列出
+  * 删除已被取代的 ProbeListDir()（非递归版，会触发 -Wunused-function）
 
-新增两条观测点：
-  1) BBPlayerPreload.preloadItems:unite:  记录是否在预加载
-  2) 缓存盘点：列出 App 沙盒 Library / Library/Caches 及常见视频缓存子目录的
-     目录结构与体积 —— 直接看有没有视频字节落盘、有多大
-     （只读，限条数，避免大目录卡住）
-[verdict] 与心跳同步加入「预加载」计数，并给出对应结论分支。
+过程记录：用 PowerShell Set-Content 改文件时被写成 CRLF，
+本地 preflight 的行尾检查当场拦下（1323 处），已转回 LF。
+这说明该闸门确实在起作用。
