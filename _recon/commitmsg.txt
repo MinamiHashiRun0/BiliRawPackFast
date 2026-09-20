@@ -1,23 +1,33 @@
-fix(build): ldid 缺失导致 Error 127 —— 显式用 codesign 做 ad-hoc
+feat(deliver): dylib 构建通过并独立复核 —— 交付探针
 
-CI 表现: 编译 ✓、链接 ✓、进入 "Generating debug symbols" 之后突然
-        make Error 127（command not found），极易误判成 dsymutil 出问题。
+CI（run 35523085355）结果：
+  Build BiliProbe.dylib  ✓
+  Verify dylib           ✓
+  Package for signing    ✓
+  Upload dylib           ✓
+  Upload plugin package  ✓
+  Release dylib only     ✘ 仅此一步失败
 
-根因（读 Theos 源码定位）：
-  makefiles/targets/_common/darwin_head.mk
-    ifeq ($(TARGET_CODESIGN),)
-      ... ldid 找不到时 TARGET_CODESIGN = ldid   # 裸命令名
-    endif
-    TARGET_CODESIGN_FLAGS ?= -S
-  即 Darwin 上 Theos 默认用 `ldid -S` 做 ad-hoc 签名；runner 上
-  ldid 既不在 PATH 也不在 SDKBINPATH → 以裸名执行 → 127。
+产物实测（Verify 输出）：
+  Mach-O 64-bit dynamically linked shared library arm64
+  依赖 6 个，全部系统库：libobjc.A / Foundation / CoreFoundation /
+    UIKit / AVFoundation / libSystem.B
+  install name = @executable_path/Frameworks/BiliProbe.dylib
 
-修复（双保险）：
-  1. workflow 的 Setup Theos 里补装 ldid 到 $THEOS/bin（进 PATH，
-     __executable(ldid) 检查即命中），三个来源依次回退
-  2. Makefile 里 override TARGET_CODESIGN=codesign
-     TARGET_CODESIGN_FLAGS='--force --sign -'
-     macOS 自带 codesign，ad-hoc 对「后续还要整包重签」的 dylib 完全够用；
-     用 override 保证命令行传参也覆盖不掉，CI 与本机行为一致
+本地独立复核 _recon/verify_dylib.py（不依赖 macOS 工具，自己解析 Mach-O）：
+  ✔ arm64 瘦切片、MH_DYLIB
+  ✔ install name 正确
+  ✔ 未加密（cryptid 全 0）
+  ✔ 6 个依赖全为系统库/自身路径
+  ✔ 平台 iOS、部署目标 14.0.0（与 App 主二进制 minos 一致）
+  ✔ 已带 ad-hoc 代码签名
+  ✔ 含 BiliProbe / biliprobe 标记
+  sha256 = 16A64214F6130A82F0387717930079CD31693C28B10BA98F3B61E7B9B8ED747F
 
-这样即使 ldid 三个源都拉不到，构建也不会再挂在签名这一步。
+修复：
+  * workflow 加 permissions: contents: write —— 否则建 release 报
+    "Resource not accessible by integration"
+  * verify_dylib.py 第一版把「存在 LC_ENCRYPTION_INFO_64」误判为已加密；
+    链接器默认就会发这条命令，正确判据是 cryptid 是否为 0。已改正。
+
+交付：deliver/BiliProbe.dylib（114,688 字节）+ 使用说明。

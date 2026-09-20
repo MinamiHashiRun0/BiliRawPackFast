@@ -12,6 +12,12 @@
 
 name: Build BiliProbe
 
+# softprops/action-gh-release 建 release 需要 contents: write。
+# 不加会报 "Resource not accessible by integration"（构建本身是成功的，
+# 只有最后建 release 这步失败，容易误判成构建挂了）。
+permissions:
+  contents: write
+
 "on":
   workflow_dispatch:
     inputs:

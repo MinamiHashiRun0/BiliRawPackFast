@@ -27,3 +27,7 @@ inject/probe/.theos/
 Thumbs.db
 __pycache__/
 *.pyc
+
+# CI 产物本地副本
+_artifact/
+deliver/
