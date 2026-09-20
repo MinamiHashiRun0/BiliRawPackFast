@@ -28,4 +28,11 @@ BiliProbe_FRAMEWORKS = Foundation UIKit AVFoundation
 BiliProbe_CFLAGS = -fobjc-arc -O2 -Wall -Wno-unused-parameter
 BiliProbe_LDFLAGS = -Wl,-install_name,@executable_path/Frameworks/BiliProbe.dylib
 
+# 把构建身份编进 dylib，并在启动时打进日志。
+# 起因：真机日志里无法分辨是哪个版本的探针在跑 —— 已经因此白跑过两轮
+# （用户装的、和我以为的，不是同一个构建）。日志自称版本后这类误会不可能再发生。
+BUILD_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BiliProbe_CFLAGS += -DPROBE_BUILD_SHA='"$(BUILD_SHA)"' -DPROBE_BUILD_TIME='"$(BUILD_TIME)"'
+
 include $(THEOS_MAKE_PATH)/library.mk

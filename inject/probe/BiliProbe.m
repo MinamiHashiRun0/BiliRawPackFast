@@ -40,6 +40,15 @@
 #import <mach-o/dyld.h>
 #include <stdatomic.h>
 
+// 构建身份由 Theos Makefile 通过 -D 传入。这里给兜底，
+// 使本文件在 Theos 之外（例如 macOS 上直接用 clang 编译做语法检查）也能编译。
+#ifndef PROBE_BUILD_SHA
+#define PROBE_BUILD_SHA "local"
+#endif
+#ifndef PROBE_BUILD_TIME
+#define PROBE_BUILD_TIME "local"
+#endif
+
 //------------------------------------------------------------------------------
 #pragma mark - 日志
 //------------------------------------------------------------------------------
@@ -428,15 +437,44 @@ static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRe
 static _Atomic(int32_t) gCntRequestConstructed = 0;
 
 static IMP gOrigReqInitURL = NULL;
+static IMP gOrigReqClassURL = NULL;
+static IMP gOrigReqInitURLString = NULL;
 
 static id ProbeRequestInitWithURL(id self, SEL _cmd, NSURL *URL) {
     if (ProbeHostLooksLikeMedia(URL)) {
         ProbeBump(&gCntRequestConstructed);
-        PLog(@"request", @"NSURLRequest 构造 host=%@\n          URL=%.400@",
+        PLog(@"request", @"NSURLRequest initWithURL host=%@\n          URL=%.400@",
              URL.host ?: @"?", URL.absoluteString ?: @"?");
     }
     if (gOrigReqInitURL) {
         return ((id (*)(id, SEL, id))gOrigReqInitURL)(self, _cmd, URL);
+    }
+    return nil;
+}
+
+/// 类方法构造：requestWithURL: —— 很多代码走这条而不是 alloc/init
+static id ProbeRequestClassWithURL(id self, SEL _cmd, NSURL *URL) {
+    if (ProbeHostLooksLikeMedia(URL)) {
+        ProbeBump(&gCntRequestConstructed);
+        PLog(@"request", @"NSURLRequest requestWithURL host=%@\n          URL=%.400@",
+             URL.host ?: @"?", URL.absoluteString ?: @"?");
+    }
+    if (gOrigReqClassURL) {
+        return ((id (*)(id, SEL, id))gOrigReqClassURL)(self, _cmd, URL);
+    }
+    return nil;
+}
+
+/// initWithURL: 的字符串变体
+static id ProbeRequestInitWithURLString(id self, SEL _cmd, NSString *s) {
+    NSURL *URL = s.length ? [NSURL URLWithString:s] : nil;
+    if (ProbeHostLooksLikeMedia(URL)) {
+        ProbeBump(&gCntRequestConstructed);
+        PLog(@"request", @"NSURLRequest initWithURL(String) host=%@\n          URL=%.400@",
+             URL.host ?: @"?", s ?: @"?");
+    }
+    if (gOrigReqInitURLString) {
+        return ((id (*)(id, SEL, id))gOrigReqInitURLString)(self, _cmd, s);
     }
     return nil;
 }
@@ -915,6 +953,12 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
 + (void)bootstrap {
     @autoreleasepool {
         PLog(@"boot", @"================ BiliProbe 已加载 ================");
+        // 版本自报：日志必须能自证是哪个构建产出的。
+        // 起因：已经因"用户装的构建 ≠ 我以为的构建"白跑过两轮真机测试。
+        PLog(@"boot", @"构建 SHA=%s  构建时间=%s  编译于 %s %s",
+             PROBE_BUILD_SHA, PROBE_BUILD_TIME, __DATE__, __TIME__);
+        PLog(@"boot", @"观测点清单：AVAssetResourceLoader / NSURLSession×2 / "
+                      @"NSURLRequest×3 / BBRMediaDownloader×2");
         PLog(@"boot", @"主程序=%@ PID=%d", NSBundle.mainBundle.executablePath, getpid());
 
         ProbeLogEnvironment();
@@ -944,8 +988,21 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
         // ②b 第三观测点：NSURLRequest 构造（更上游，能覆盖不经 NSURLSession 的路径）
         Class reqCls = NSClassFromString(@"NSURLRequest");
         if (reqCls) {
+            // 三条独立的构造路径，各挂各的（注意：不能把同一个选择子换两次 ——
+            // 第二次会覆盖第一次，而第一次抓到的"原 IMP"就变成了我们自己的函数，
+            // 结果是无限递归。这是本次差点写错的地方，记下来。）
             gOrigReqInitURL = ProbeReplaceMethod(reqCls, @selector(initWithURL:),
                                                  (IMP)ProbeRequestInitWithURL, "@@:@@");
+            // 字符串变体是**另一个**选择子。
+            // 注意：这里必须把返回的原 IMP 存下来 —— 若漏掉，
+            // ProbeRequestInitWithURLString 里的 gOrigReqInitURLString 会是 NULL，
+            // 于是每次字符串构造都返回 nil，直接打断 App 建请求。
+            gOrigReqInitURLString = ProbeReplaceMethod(reqCls, @selector(initWithURLString:),
+                                                       (IMP)ProbeRequestInitWithURLString, "@@:@@");
+            // 类方法构造
+            gOrigReqClassURL = ProbeReplaceMethod(object_getClass(reqCls),
+                                                  @selector(requestWithURL:),
+                                                  (IMP)ProbeRequestClassWithURL, "@@:@@");
         } else {
             PLog(@"hook", @"✗ NSURLRequest 不在运行时（异常）");
         }
