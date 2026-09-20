@@ -1,26 +1,25 @@
-feat(probe): 排除 resourceLoader 私有子类盲区 + 证明播放器是否 AVPlayer 系
+fix(tool): gh run download 不带 run id 会拿到缓存旧 artifact —— 差点交付错包
 
-真机证据（横屏视频，播了 75 秒，02:19:07 起）：
-  02:19:22 beat1 与 02:20:22 beat5 的计数完全相同
-  （NSURLSession=2 NSURLRequest=14，且那 14 次全是启动时的 archive/*.json 与主题包）
-  → 视频字节完全绕开 NSURL 系 API。
+问题：本次构建产物是 171,072 字节 / SHA 6C733F14…，
+但 `gh run download --name BiliProbe-dylib`（不带 run id）取回的是
+**上一次缓存**的 168,960 字节 / SHA DC3FDD60…。
+两个 SHA 完全不同，我因为"大小与上轮相同"才发现异常 ——
+否则会把旧包当新包交给用户，又是一轮白跑。
 
-但这暴露了我探针的一个**盲区**，必须先排掉再下结论：
-  我只在 AVAssetResourceLoader **这个类**上替换了 setDelegate:queue:。
-  若运行时对象其实是它的私有子类（如 AVAssetResourceLoaderInternal），
-  消息会走子类实现，我的探针永不被调用，setDelegate 恒为 0 ——
-  看起来像「App 没用 AVPlayer」，其实只是没钩到真正的类。
+本次改为 `gh run download <run-id> --name …` 显式指定，取到正确产物。
+（注：GitHub 侧确实存在同名新 artifact，created_at 18:23:49，
+  所以是 gh 侧的解析/缓存问题，不是构建没跑。）
 
-新增两条 hook 用于定性：
-  * AVURLAsset - resourceLoader
-      取回对象并打印**真实类**；若真实类 != AVAssetResourceLoader，
-      立刻在该类上补挂 setDelegate:queue:（幂等）
-  * AVURLAsset - initWithURL:options:
-      打印 scheme/host/URL。这次保存原 IMP 并调用它、返回真实资产，
-      既不破坏行为又能观测（上一版刻意不钩它，是因为当时没法两全）。
+一并记录本轮真机结论（横屏视频，新探针，播 75 秒，02:19:07 起）：
+  02:19:22 beat1 与 02:20:22 beat5 计数完全相同
+  （NSURLSession=2 NSURLRequest=14；那 14 次全是启动时 archive/*.json 与主题包）
+  → 视频字节完全绕开 NSURL 系 API，且 AVAssetResourceLoader 未被使用。
 
-[verdict] 分支相应调整为四种可执行结论：
-  段级下载>0            → 落点确定 BBRMediaDownloader（改 host + 段级并发）
-  AVURLAsset/加载器类>0 → 播放器是 AVPlayer 系，但下载器未触发 → 疑似 P2P 分支或缓存
-  委托 shouldWait>0     → 走资源加载委托，可接管
-  全零且 AVURLAsset=0   → 播放器不是 AVPlayer 系，需换注入思路
+  同时发现我探针的盲区：只在 AVAssetResourceLoader 类上替换了 setDelegate:queue:，
+  若运行时对象是其私有子类则永远不会被调用，setDelegate 恒为 0 ——
+  看起来像"App 没用 AVPlayer"，其实只是没钩到真正的类。本提交新增：
+    * AVURLAsset.resourceLoader  取回对象并打印**真实类**，若不是父类则就地补挂
+    * AVURLAsset.initWithURL:options:  打印 scheme/host/URL
+  用于把这一可能性排除掉。
+
+本包即含上述两条 hook。
