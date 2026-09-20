@@ -163,6 +163,7 @@ static IMP ProbeReplaceMethod(Class cls, SEL sel, IMP newImp, const char *types)
 + (void)probe_installDelegateHooksOnClass:(Class)cls;
 + (void)probe_noteRecycleMiss:(NSString *)clsName sel:(NSString *)selName;
 + (void)probe_installStage23;
++ (void)probe_installPositiveControls;
 @end
 
 /// 观测计数（供心跳使用）。
@@ -183,6 +184,13 @@ static _Atomic(int32_t) gCntMediaUrlSeen   = 0;   // 看见媒体 URL 的次数
 static _Atomic(int32_t) gCntMediaUrlRewrite = 0;  // 真正改写成回环代理的次数
 static _Atomic(int32_t) gCntUrlHookFired   = 0;   // 任一 URL 承载 hook 被调用的次数
 
+// 播放正证据 + 全网观测（见文件末尾「阶段 0：仪器自证」）
+static _Atomic(int32_t) gCntPlayerLifecycle = 0;  // 播放器生命周期方法命中次数
+static _Atomic(int32_t) gCntTaskResume      = 0;  // 全部 NSURLSessionTask.resume（不论怎么建出来的）
+static _Atomic(int32_t) gCntPlayerVCAppear  = 0;  // 播放器视图控制器出现次数
+static NSHashTable     *gLivePlayers        = nil; // 弱引用：活着的播放器实例
+static NSMutableDictionary<NSString *, NSNumber *> *gTaskHostHist = nil; // host -> 次数
+
 static inline void ProbeBump(_Atomic(int32_t) *p) {
     atomic_fetch_add_explicit(p, 1, memory_order_relaxed);
 }
@@ -194,6 +202,10 @@ static inline int32_t ProbeRead(_Atomic(int32_t) *p) {
 /// 不能用共享选择子做键：多个 delegate 类会撞车，各自的原实现会互相覆盖。
 static void        ProbeRegSet(NSString *cls, NSString *sel, IMP imp);
 static IMP         ProbeFetchOriginal(Class cls, SEL sel);
+
+/// 读出所有活着的播放器实例当前状态（定义在「阶段 0：仪器先自证」一节）。
+/// 「是否真的在播」只能以它为准，不能拿「我的 hook 有没有响」去推断。
+static NSString   *ProbePlayerSnapshot(void);
 
 /// 统一转发：查回原实现并调用它，把真实返回值带回。
 /// 探针「零行为改动」就靠这个函数 —— 调用方拿到的就是 App 原本会拿到的结果。
@@ -1154,10 +1166,34 @@ static void ProbeEmitVerdict(NSString *phase) {
          (unsigned long)[BSPProxyServer shared].totalRequests,
          (unsigned long)[BSPProxyServer shared].rewrittenURLCount);
 
+    // ── 播放正证据：不再靠推断「有没有在播」 ──
+    PLog(@"verdict", @"播放正证据：播放器生命周期命中=%d 播放页出现=%d | 全网任务 resume=%d",
+         ProbeRead(&gCntPlayerLifecycle), ProbeRead(&gCntPlayerVCAppear),
+         ProbeRead(&gCntTaskResume));
+    PLog(@"verdict", @"播放器当前状态：\n%@", ProbePlayerSnapshot());
+
+    // ── 全网任务 host 直方图：看 App 到底在请求谁 ──
+    if (gTaskHostHist.count) {
+        NSArray<NSString *> *hosts = [gTaskHostHist.allKeys
+            sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                return [gTaskHostHist[b] compare:gTaskHostHist[a]];
+            }];
+        NSMutableString *h = [NSMutableString string];
+        for (NSUInteger i = 0; i < hosts.count && i < 25; i++) {
+            [h appendFormat:@"      %-46@ %@ 次\n", hosts[i], gTaskHostHist[hosts[i]]];
+        }
+        PLog(@"verdict", @"全网 NSURLSessionTask 目标 host Top%lu（共 %lu 个 host）：\n%@",
+             (unsigned long)MIN(hosts.count, (NSUInteger)25), (unsigned long)hosts.count, h);
+    }
+
     if (urlRewrote > 0) {
         PLog(@"verdict", @"★★★ 阶段 3 已生效！媒体 URL 已被改写进回环代理，"
                          @"播放器字节现在走本地并发抓取。CDN 分担情况：\n%@",
              [[BSPProxyServer shared] statsReport]);
+    } else if (ProbeRead(&gCntPlayerLifecycle) == 0 && ProbeRead(&gCntTaskResume) < 5) {
+        PLog(@"verdict", @"⚠ 播放器生命周期 0 次命中、全网任务也几乎为零 —— "
+                         @"这**不能**说明「没播视频」（上一版我就是这么误判的）。"
+                         @"它说明我的观测点没覆盖到实际链路，请以「播放器当前状态」那几行为准。");
     } else if (urlHooks > 0) {
         PLog(@"verdict", @"★★ URL 承载 hook 已被调用 %d 次，但没识别出 B 站媒体 URL —— "
                          @"说明调用链对了、URL 特征没匹配上（看 [rewrite]/[hook] 行）", urlHooks);
@@ -1588,12 +1624,16 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"· BGMFragmentP2pDownloader2 不在运行时");
         }
 
-        // ③ 阶段 2/3：回环代理 + URL 改写 hook。
+        // ③ 阶段 0：播放正证据 + 全网观测。必须最先装 ——
+        //    它决定了后面那些结论到底能不能被信任。
+        [self probe_installPositiveControls];
+
+        // ④ 阶段 2/3：回环代理 + URL 改写 hook。
         //    放在这里（而不是延后）的原因：IJK 播放内核与 DASH 分片对象可能在
         //    用户点开视频前就被初始化，hook 必须尽早装。
         [self probe_installStage23];
 
-        // ④ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
+        // ⑤ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -1641,6 +1681,11 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                      ProbeRead(&gCntDlWithUrl),
                      (unsigned long)[BSPProxyServer shared].totalRequests,
                      ProbeRead(&gCntMediaUrlRewrite));
+                // 每次心跳都把「播放器自己报的状态」打出来。
+                // 这是整份日志里唯一能证明「确实在播」的东西，不能只在结论里出现一次。
+                PLog(@"beat", @"  播放正证据：生命周期=%d 播放页=%d 全网任务=%d\n%@",
+                     ProbeRead(&gCntPlayerLifecycle), ProbeRead(&gCntPlayerVCAppear),
+                     ProbeRead(&gCntTaskResume), ProbePlayerSnapshot());
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
@@ -1898,6 +1943,251 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
         }
         ProbeWriteFile(@"encodings.txt", s);
     }
+}
+
+//=== 8. 阶段 0：仪器先自证 ====================================================
+//
+// 为什么必须加这一段（把错误记下来，避免以后再犯）：
+//   之前所有结论都建立在「我挂的目标 hook 有没有响」上。目标选错时，日志会
+//   退化成「一片零」，而我却把这读成「用户没播视频」—— 这是拿仪器的不确定性
+//   去质疑被观测者，方法上就是错的。
+//   实际上我自己的分析早就得出「IJK 是自研 FFmpeg 内核，字节不走 NSURL 系 API」，
+//   那么观测点全零**恰恰是视频正常播放时应有的样子**。两句话自相矛盾，我没发现。
+//
+// 现在改成让播放器自己报数，这些方法的 type encoding 全部来自真机 classes.txt：
+//   isPlaying (B) / currentPlaybackTime (d)         -> 是否在播、播到第几秒
+//   getVideoTcpSpeed / getTcpSpeed (q)              -> 视频字节**此刻**速率，>0 即硬证据
+//   getVideoCachedDuration (q)                      -> 已缓冲时长
+//   httpOpenDelegate / tcpOpenDelegate /
+//   rawDataDelegate / fileOpenDelegate (@)          -> IJK 究竟用哪条 IO 通道取字节
+// 最后一项尤其关键：若 httpOpenDelegate 非空，说明 IJK 把网络完全交给了 App 自己
+// 的实现，这能一次性解释「为什么 NSURL 系观测点全为零」。
+
+static NSMutableDictionary<NSString *, NSNumber *> *gPlayerHookHits = nil;
+
++ (void)probe_hookPlayerLifecycle:(NSString *)clsName
+                         selector:(NSString *)selName
+                           shapes:(NSString *)shapes
+                            label:(NSString *)label
+{
+    if (!NSClassFromString(clsName)) {
+        PLog(@"hook", @"· [播放器] %@ 不在运行时", clsName);
+        return;
+    }
+    {
+        NSString *key = [NSString stringWithFormat:@"%@::%@", clsName, selName];
+        __block BOOL firstLogged = NO;
+        __block NSInteger hits = 0;
+
+        BSPHookHandler before = ^(NSInvocation *inv, BOOL *skip) {
+            (void)skip;
+            ProbeBump(&gCntPlayerLifecycle);
+            ProbeBumpHookHit(key);
+            @synchronized (gPlayerHookHits) { hits++; }
+            if (!firstLogged) {
+                firstLogged = YES;
+                PLog(@"player", @"▶ 播放器生命周期首次命中：%@（%@）", key, label);
+            }
+        };
+        BSPHookAfter after = ^(NSInvocation *inv) {
+            id t = inv.target;
+            if (!t) return;
+            @synchronized (gLivePlayers) { [gLivePlayers addObject:t]; }
+        };
+
+        BOOL ok = [BSPDynamicHook hookClass:clsName selector:selName expectShapes:shapes
+                                     before:before after:after];
+        PLog(@"hook", @"%@ [播放器] %@ :: %@  %@", ok ? @"✓" : @"✗", clsName, selName, label);
+    }
+}
+
+/// 读出所有活着的播放器实例当前状态。这是「是否真的在播」的唯一权威来源。
+static NSString *ProbePlayerSnapshot(void) {
+    NSArray *live;
+    NSMutableString *out = [NSMutableString string];
+
+    if (!gLivePlayers) return @"播放器实例=0（正证据模块未启用）";
+    @synchronized (gLivePlayers) { live = gLivePlayers.allObjects; }
+    if (live.count == 0) {
+        return @"播放器实例=0 —— 播放器对象从未在本进程创建。"
+               @"若你确实在播视频，那就说明播放器跑在**另一个进程**里。";
+    }
+
+    for (id p in live) {
+        Class c = object_getClass(p);
+        BOOL playing = NO, prepared = NO;
+        double t = 0, dur = 0;
+        long long vs = 0, as = 0, ts = 0, vc = 0, ac = 0, st = 0;
+        id httpD = nil, tcpD = nil, rawD = nil, fileD = nil;
+
+        if ([p respondsToSelector:@selector(isPlaying)])
+            playing = ((BOOL (*)(id, SEL))objc_msgSend)(p, @selector(isPlaying));
+        if ([p respondsToSelector:@selector(isPreparedToPlay)])
+            prepared = ((BOOL (*)(id, SEL))objc_msgSend)(p, @selector(isPreparedToPlay));
+        if ([p respondsToSelector:@selector(currentPlaybackTime)])
+            t = ((double (*)(id, SEL))objc_msgSend)(p, @selector(currentPlaybackTime));
+        if ([p respondsToSelector:@selector(duration)])
+            dur = ((double (*)(id, SEL))objc_msgSend)(p, @selector(duration));
+        if ([p respondsToSelector:@selector(getVideoTcpSpeed)])
+            vs = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getVideoTcpSpeed));
+        if ([p respondsToSelector:@selector(getAudioTcpSpeed)])
+            as = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getAudioTcpSpeed));
+        if ([p respondsToSelector:@selector(getTcpSpeed)])
+            ts = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getTcpSpeed));
+        if ([p respondsToSelector:@selector(getVideoCachedDuration)])
+            vc = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getVideoCachedDuration));
+        if ([p respondsToSelector:@selector(getAudioCachedDuration)])
+            ac = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getAudioCachedDuration));
+        if ([p respondsToSelector:@selector(getPlayerStatus)])
+            st = ((long long (*)(id, SEL))objc_msgSend)(p, @selector(getPlayerStatus));
+        if ([p respondsToSelector:@selector(httpOpenDelegate)])
+            httpD = ((id (*)(id, SEL))objc_msgSend)(p, @selector(httpOpenDelegate));
+        if ([p respondsToSelector:@selector(tcpOpenDelegate)])
+            tcpD = ((id (*)(id, SEL))objc_msgSend)(p, @selector(tcpOpenDelegate));
+        if ([p respondsToSelector:@selector(rawDataDelegate)])
+            rawD = ((id (*)(id, SEL))objc_msgSend)(p, @selector(rawDataDelegate));
+        if ([p respondsToSelector:@selector(fileOpenDelegate)])
+            fileD = ((id (*)(id, SEL))objc_msgSend)(p, @selector(fileOpenDelegate));
+
+        [out appendFormat:@"  <%@ %p> 在播=%@ 已就绪=%@ 进度=%.1fs/%.1fs 状态=%lld\n",
+             NSStringFromClass(c), p, playing ? @"是" : @"否", prepared ? @"是" : @"否",
+             t, dur, st];
+        [out appendFormat:@"      视频TCP速率=%.1f KiB/s  音频=%.1f KiB/s  合计=%.1f KiB/s\n",
+             (double)vs / 1024.0, (double)as / 1024.0, (double)ts / 1024.0];
+        [out appendFormat:@"      缓冲：视频 %lld ms  音频 %lld ms\n", vc, ac];
+        [out appendFormat:@"      IO 通道：http=%@ tcp=%@ rawData=%@ file=%@\n",
+             httpD ? NSStringFromClass(object_getClass(httpD)) : @"(空)",
+             tcpD  ? NSStringFromClass(object_getClass(tcpD))  : @"(空)",
+             rawD  ? NSStringFromClass(object_getClass(rawD))  : @"(空)",
+             fileD ? NSStringFromClass(object_getClass(fileD)) : @"(空)"];
+    }
+    return out;
+}
+
++ (void)probe_installPositiveControls
+{
+    PLog(@"hook", @"──── 阶段 0：播放正证据 + 全网观测 ────");
+
+    if (!gLivePlayers) {
+        gLivePlayers = [NSHashTable hashTableWithOptions:NSPointerFunctionsWeakMemory |
+                                NSPointerFunctionsObjectPointerPersonality];
+    }
+    if (!gPlayerHookHits) gPlayerHookHits = [NSMutableDictionary dictionary];
+    if (!gTaskHostHist) gTaskHostHist = [NSMutableDictionary dictionary];
+
+    // ---- A. 播放器生命周期：拿到实例，之后由心跳轮询它自己报数 ----
+    // shapes 全部取自真机 classes.txt 的 method_getTypeEncoding。
+    {
+        struct { const char *cls; const char *sel; const char *shapes; const char *label; } t[] = {
+            {"IJKFFMoviePlayerControllerFFPlay", "play",                          "",  "开始播放"},
+            {"IJKFFMoviePlayerControllerFFPlay", "prepareToPlay",                 "",  "准备播放"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initUsingItemWithOptions:",     "@", "用 Item 构建"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initUsingItemWithOptions:withGLView:", "@@", "用 Item 构建(带视图)"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithContentURL:withOptions:",      "@@", "用 URL 构建"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithContentURLString:withOptions:","@@", "用 URL 字符串构建"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithMoreContent:withOptions:withGLView:",       "@@@", "多段构建"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithMoreContentString:withOptions:withGLView:","@@@", "多段构建(字符串)"},
+            {"IJKFFMoviePlayerControllerFFPlay", "resetWithContentURLString:withOptions:", "@@", "重置 URL"},
+            {"IJKFFMoviePlayerController",       "play",                          "",  "开始播放"},
+            {"IJKFFMoviePlayerController",       "prepareToPlay",                 "",  "准备播放"},
+            {"IJKFFMoviePlayerController",       "initUsingItemWithOptions:",     "@", "用 Item 构建"},
+            {"IJKFFMoviePlayerController",       "initUsingItemWithOptions:withGLView:", "@@", "用 Item 构建(带视图)"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "play",                        "",  "开始播放(AVPlayer)"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "prepareToPlay",               "",  "准备播放(AVPlayer)"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "initUsingItem",               "",  "用 Item 构建(AVPlayer)"},
+            {"IJKMediaPlayerWrapper", "start",                                    "",  "包装器启动"},
+            {"IJKMediaPlayerWrapper", "prepareWithItem:",                         "@", "包装器准备"},
+            {"IJKMediaPlayerItem", "start",                                       "",  "内核 Item 启动"},
+            {"IJKMediaPlayerItem", "applyTo:",                                    "^v", "Item 灌进 C++ 内核"},
+        };
+        for (NSUInteger i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+            [self probe_hookPlayerLifecycle:[NSString stringWithUTF8String:t[i].cls]
+                                   selector:[NSString stringWithUTF8String:t[i].sel]
+                                     shapes:[NSString stringWithUTF8String:t[i].shapes]
+                                      label:[NSString stringWithUTF8String:t[i].label]];
+        }
+    }
+
+    // ---- B. 播放器视图控制器出现 = 用户确实进了视频页 ----
+    {
+        for (NSString *cn in @[@"BBPlayerViewController", @"BBPgcPlayerViewController"]) {
+            if (!NSClassFromString(cn)) continue;
+            [self probe_hookPlayerLifecycle:cn selector:@"viewDidAppear:" shapes:@"B" label:@"进入视频页"];
+        }
+    }
+
+    // ---- C. 全网观测：NSURLSessionTask.resume ----
+    //
+    // 为什么改用这个而不是继续挂各种 dataTaskWith* 工厂：
+    //   上一版只挂了 NSURLSession 的两个工厂方法，跑完整场只记录到 2 个 NSURLRequest。
+    //   App 里图片/接口那么多请求不可能只有 2 个 —— 说明大量请求根本没经过
+    //   NSURLRequest 的 ObjC 初始化（CoreFoundation 内部直接造 __NSCFURLRequest），
+    //   或者走的是 dataTaskWithURL: 这类我没挂的工厂。
+    //   resume 是所有任务最终都必须走的一步，挂它才是真正全覆盖。
+    {
+        BSPHookHandler before = ^(NSInvocation *inv, BOOL *skip) {
+            (void)skip;
+            id task = inv.target;
+            NSURLRequest *r = nil;
+            NSString *host;
+            if (![task respondsToSelector:@selector(originalRequest)]) return;
+            r = [task originalRequest];
+            if (![r isKindOfClass:NSURLRequest.class]) return;
+            if (ProbeIsOurProxyUpstream(r)) return;
+
+            ProbeBump(&gCntTaskResume);
+            host = r.URL.host.lowercaseString ?: @"(无host)";
+            @synchronized (gTaskHostHist) {
+                gTaskHostHist[host] = @([gTaskHostHist[host] integerValue] + 1);
+            }
+            if (ProbeHostLooksLikeMedia(r.URL)) {
+                PLog(@"session", @"★ 任务 resume 命中媒体 host=%@ method=%@ range=%@\n          URL=%.300@",
+                     host, r.HTTPMethod ?: @"?", [r valueForHTTPHeaderField:@"Range"] ?: @"(无)",
+                     r.URL.absoluteString ?: @"?");
+            }
+        };
+        BOOL ok = [BSPDynamicHook hookClass:@"NSURLSessionTask" selector:@"resume"
+                               expectShapes:@"" before:before after:nil];
+        PLog(@"hook", @"%@ [全网] NSURLSessionTask :: resume（覆盖所有任务，不论怎么建出来的）",
+             ok ? @"✓" : @"✗");
+
+        [BSPDynamicHook hookClass:@"NSURLSession" selector:@"dataTaskWithURL:"
+                     expectShapes:@"@" before:nil after:nil];
+        [BSPDynamicHook hookClass:@"NSURLSession" selector:@"dataTaskWithURL:completionHandler:"
+                     expectShapes:@"@?" before:nil after:nil];
+
+        // 关键自检：resume 到底实现在哪一层。
+        // 若具体类自己实现了 resume，挂在 NSURLSessionTask 上的 hook 就永远不会响
+        // —— 那正是上一版「挂了却零命中」的翻版，必须提前说清楚而不是等真机才发现。
+        {
+            Method base = class_getInstanceMethod([NSURLSessionTask class], @selector(resume));
+            IMP baseImp = base ? method_getImplementation(base) : NULL;
+            NSMutableString *s = [NSMutableString string];
+            for (NSString *cn in @[@"__NSCFURLSessionTask", @"__NSCFURLSessionDataTask",
+                                   @"__NSCFURLSessionDownloadTask", @"__NSCFURLSessionUploadTask"]) {
+                Class c = NSClassFromString(cn);
+                if (!c) continue;
+                Method m = class_getInstanceMethod(c, @selector(resume));
+                BOOL overrides = (m && method_getImplementation(m) != baseImp);
+                [s appendFormat:@"      %@：%@\n", cn, overrides ? @"自己实现了 resume（会绕过我的 hook）"
+                                                                : @"继承 NSURLSessionTask 的 resume"];
+            }
+            PLog(@"hook", @"· [全网] resume 实现层自检：%@\n%@",
+                 baseImp ? @"NSURLSessionTask 上有 resume" : @"!! NSURLSessionTask 上没有 resume，hook 未安装",
+                 s.length ? s : @"      （未找到已知的具体类）");
+        }
+    }
+
+    // 关于 NSURLProtocol：上一版挂的是基类 canInitWithRequest:，而基类并不实现它
+    // （抽象方法），那条 hook 直接安装失败、计数永远为 0。
+    // 这一版**刻意不再逐个具体子类去挂**：系统协议类（_NSURLHTTPProtocol、
+    // WKCustomProtocol 等）是所有网络请求的必经之路，往它们身上装转发器会给
+    // 全 App 的 URL 加载加一层开销，风险与收益不成比例。
+    // 「App 到底请求了什么」已经由 resume 全覆盖回答，静态的协议实现者清单
+    // 也已经在 resloader-delegates.txt 里，这里不再重复。
+
+    PLog(@"hook", @"阶段 0 安装完成。心跳里会轮询播放器自己报的 isPlaying / 视频TCP速率 —— "
+                  @"这两个值出现非零，就说明「确实在播」这件事不再需要靠推断。");
 }
 
 @end
