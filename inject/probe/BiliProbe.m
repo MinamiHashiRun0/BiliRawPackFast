@@ -712,6 +712,59 @@ static void ProbeDumpCaches(void) {
 
         // 2) Library 下逐层统计（636MB 在哪一目了然）
         ProbeScanTree(lib, @"Library 下各一级项", 20);
+
+        // 2b) 关键：把 Library 一级子目录**分别再扫一层**，并按体积列出最大文件。
+        //     上一版只列了一级，看到 Library=639MB 但不知道在哪个子目录里；
+        //     而 Caches 只有 31MB —— 说明视频缓存不在 Caches。
+        NSArray<NSString *> *subs = [fm contentsOfDirectoryAtPath:lib error:NULL];
+        for (NSString *name in subs) {
+            NSString *p = [lib stringByAppendingPathComponent:name];
+            BOOL sub = NO;
+            [fm fileExistsAtPath:p isDirectory:&sub];
+            if (!sub) continue;
+            if ([name isEqualToString:@"Caches"]) continue;   // 上面已扫
+            ProbeScanTree(p, [@"Library/" stringByAppendingString:name], 12);
+        }
+
+        // 2c) 全沙盒找最大的 40 个文件（只按体积，不看路径猜测）
+        {
+            NSMutableArray<NSDictionary *> *big = [NSMutableArray array];
+            NSDirectoryEnumerator *e = [fm enumeratorAtPath:container];
+            NSString *rel; NSUInteger scanned = 0;
+            while ((rel = [e nextObject]) && scanned < 60000) {
+                scanned++;
+                NSDictionary *a = [e fileAttributes];
+                if ([a[NSFileType] isEqual:NSFileTypeDirectory]) continue;
+                unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
+                if (sz < 256 * 1024) continue;               // 只看 >=256KB
+                [big addObject:@{@"path": rel, @"bytes": @(sz),
+                                 @"mtime": a[NSFileModificationDate] ?: [NSDate date]}];
+            }
+            [big sortUsingComparator:^NSComparisonResult(NSDictionary *x, NSDictionary *y) {
+                return [y[@"bytes"] compare:x[@"bytes"]];
+            }];
+            NSMutableString *o = [NSMutableString string];
+            [o appendFormat:@"===== 沙盒内最大文件 Top 40（>=256KB，扫了 %lu 个）=====\n",
+                             (unsigned long)scanned];
+            NSUInteger k = 0;
+            for (NSDictionary *r in big) {
+                if (k++ >= 40) break;
+                [o appendFormat:@"  %12llu 字节  %@  （改于 %@）\n",
+                 [r[@"bytes"] unsignedLongLongValue], r[@"path"],
+                 r[@"mtime"]];
+            }
+            if (big.count == 0) [o appendString:@"  (没有 >=256KB 的文件)\n"];
+            PLog(@"cache", @"%@", o);
+        }
+
+        // 2d) p2p_proxy.json 内容（判断 PCDN/MCDN 是否被启用）
+        if (caches.length) {
+            NSString *pj = [caches stringByAppendingPathComponent:@"p2p_config/p2p_proxy.json"];
+            if ([fm fileExistsAtPath:pj]) {
+                NSString *c = [NSString stringWithContentsOfFile:pj encoding:NSUTF8StringEncoding error:NULL];
+                PLog(@"cache", @"p2p_proxy.json 内容：%@", [c substringToIndex:MIN((NSUInteger)600, c.length)]);
+            }
+        }
         // 3) Caches 再往下钻一层
         if (caches.length) {
             ProbeScanTree(caches, @"Caches 下各一级项", 25);
