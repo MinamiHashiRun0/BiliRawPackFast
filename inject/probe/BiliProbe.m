@@ -220,6 +220,14 @@ static id          ProbeAssetInitURL(id self, SEL _cmd, NSURL *URL, NSDictionary
 static void        ProbePreloadItems(id self, SEL _cmd, id items, BOOL unite);
 static void        ProbeDumpCaches(void);
 
+// NSURLProtocol / NSURLConnection / AVURLAsset 类方法（覆盖面最广的一层）
+static BOOL        ProbeProtoCanInitWithRequest(id self, SEL _cmd, NSURLRequest *request);
+static void        ProbeProtoStartLoading(id self, SEL _cmd);
+static id          ProbeConnInitWithRequest(id self, SEL _cmd, NSURLRequest *request,
+                                            id delegate, BOOL startImmediately);
+static id          ProbeAssetClassWithURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options);
+static void        ProbeScanTree(NSString *root, NSString *label, int topN);
+
 @implementation BiliProbe
 
 //=== 0. 转发与路由 ============================================================
@@ -721,6 +729,79 @@ static void ProbeDumpCaches(void) {
     }
 }
 
+//=== 2d. NSURLProtocol —— 我此前不该漏的一层 ==================================
+// 承认失误：前几轮我刻意避开 NSURLProtocol，理由是"保持零行为改动"。
+// 但真机证据是：用户点进竖屏视频刷了 90 秒，而 NSURLSession / NSURLRequest /
+// AVAssetResourceLoader / BBRMediaDownloader / 预加载 **全部为零**。
+// 那字节必然走了别处，而 NSURLProtocol 是覆盖面最广的一层：
+//   * 任何经 NSURLSession / NSURLConnection 的请求都会先问 canInitWithRequest:
+//   * 若 App 注册了自定义 protocol（二进制里确实存在 BFCFeVideoURLProtocol /
+//     BFCFeFileURLProtocol / BWAFileURLProtocol / TXYHyURLProtocol），
+//     请求会进它的 startLoading
+// 纯观测：记录后立即原样转发，不做任何改写。
+// 教训：在链路尚未定位之前，观测覆盖面的优先级高于"零改动的洁癖"。
+
+static _Atomic(int32_t) gCntProtocolCanInit = 0;
+static _Atomic(int32_t) gCntProtocolStart   = 0;
+static _Atomic(int32_t) gCntConnection      = 0;
+
+static IMP gOrigProtoCanInit   = NULL;
+static IMP gOrigProtoStart     = NULL;
+static IMP gOrigConnInit       = NULL;
+static IMP gOrigAssetClassURL  = NULL;
+
+static BOOL ProbeProtoCanInitWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    BOOL r = NO;
+    if (gOrigProtoCanInit) {
+        r = ((BOOL (*)(id, SEL, id))gOrigProtoCanInit)(self, _cmd, request);
+    }
+    // 只在"该 protocol 认领了这个请求"时记录，避免刷屏
+    if (r && ProbeHostLooksLikeMedia(request.URL)) {
+        ProbeBump(&gCntProtocolCanInit);
+        PLog(@"protocol", @"★ %@ 认领了媒体请求 host=%@\n          URL=%.400@",
+             NSStringFromClass([self class]), request.URL.host ?: @"?",
+             request.URL.absoluteString ?: @"?");
+    }
+    return r;
+}
+
+static void ProbeProtoStartLoading(id self, SEL _cmd) {
+    ProbeBump(&gCntProtocolStart);
+    NSURLRequest *req = nil;
+    @try { req = [self valueForKey:@"request"]; } @catch (__unused NSException *e) {}
+    PLog(@"protocol", @"★ %@ startLoading host=%@\n          URL=%.400@",
+         NSStringFromClass([self class]), req.URL.host ?: @"?",
+         req.URL.absoluteString ?: @"?");
+    if (gOrigProtoStart) {
+        ((void (*)(id, SEL))gOrigProtoStart)(self, _cmd);
+    }
+}
+
+static id ProbeConnInitWithRequest(id self, SEL _cmd, NSURLRequest *request,
+                                   id delegate, BOOL startImmediately) {
+    if (ProbeHostLooksLikeMedia(request.URL)) {
+        ProbeBump(&gCntConnection);
+        PLog(@"conn", @"NSURLConnection host=%@ URL=%.360@",
+             request.URL.host ?: @"?", request.URL.absoluteString ?: @"?");
+    }
+    if (gOrigConnInit) {
+        return ((id (*)(id, SEL, id, id, BOOL))gOrigConnInit)
+            (self, _cmd, request, delegate, startImmediately);
+    }
+    return nil;
+}
+
+/// AVURLAsset 还有类方法构造这条路径（此前只钩了实例 init）
+static id ProbeAssetClassWithURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options) {
+    ProbeBump(&gCntAssetInit);
+    PLog(@"asset", @"AVURLAsset URLAssetWithURL scheme=%@ host=%@\n          URL=%.300@",
+         URL.scheme ?: @"?", URL.host ?: @"?", URL.absoluteString ?: @"?");
+    if (gOrigAssetClassURL) {
+        return ((id (*)(id, SEL, id, id))gOrigAssetClassURL)(self, _cmd, URL, options);
+    }
+    return nil;
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -919,31 +1000,35 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t assetInit   = ProbeRead(&gCntAssetInit);
     int32_t loaderCls   = ProbeRead(&gCntLoaderClass);
     int32_t preloads    = ProbeRead(&gCntPreloadCall);
+    int32_t protos      = ProbeRead(&gCntProtocolCanInit);
+    int32_t protoStarts = ProbeRead(&gCntProtocolStart);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
                      @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d "
-                     @"| 预加载=%d",
+                     @"| 预加载=%d | ★URLProtocol认领=%d 启动=%d",
          hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
-         preloads);
+         preloads, protos, protoStarts);
 
-    if (dlTask > 0) {
-        PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 阶段 2/3 落点确定："
-                         @"BBRMediaDownloader（改 host + 段级并发）", dlTask);
+    if (protoStarts > 0 || protos > 0) {
+        PLog(@"verdict", @"★★ 找到了！NSURLProtocol 认领=%d 启动=%d —— "
+                         @"视频字节走的是自定义 URLProtocol。"
+                         @"阶段 2/3 的落点就是这些 protocol 类（见 [protocol] 行）",
+             protos, protoStarts);
+    } else if (dlTask > 0) {
+        PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 落点 BBRMediaDownloader", dlTask);
     } else if (preloads > 0) {
-        PLog(@"verdict", @"★ 预加载在跑（%d 次）但没有段级下载 → 视频是**提前预下载**好的，"
-                         @"播放走本地缓存。阶段 2 的落点应上移到预加载/下载层，"
-                         @"而不是播放期的网络层", preloads);
-    } else if (assetInit > 0) {
-        PLog(@"verdict", @"AVURLAsset 已创建 %d 次但下载器与预加载都没动 → "
-                         @"播放走本地缓存（可能是更早的预下载，或磁盘缓存命中）", assetInit);
+        PLog(@"verdict", @"★ 预加载在跑（%d 次）但无段级下载 → 视频是提前预下载的，"
+                         @"落点应上移到预加载/下载层", preloads);
     } else if (hookClasses > 0 && waits > 0) {
         PLog(@"verdict", @"OK 视频数据经 AVAssetResourceLoaderDelegate（shouldWait=%d）", waits);
     } else {
-        PLog(@"verdict", @"未命中 连 AVURLAsset 都没创建 → 播放器不是 AVPlayer 系，"
-                         @"或取日志时视频尚未开始");
+        PLog(@"verdict", @"未命中 全部观测点仍为零（含 NSURLProtocol/NSURLConnection）。"
+                         @"AVURLAsset=%d 预加载=%d —— 若确实在播视频，"
+                         @"说明字节完全不经 URL 系 API，属真正的自研传输栈",
+             assetInit, preloads);
     }
     PLog(@"verdict", @"=======================================");
 }
@@ -1218,6 +1303,49 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             ProbeDumpCaches();
         });
 
+        // ②f NSURLProtocol / NSURLConnection / AVURLAsset 类方法
+        //     覆盖面最广的一层，此前被我以"保持零行为改动"为由跳过了
+        Class protoCls = NSClassFromString(@"NSURLProtocol");
+        if (protoCls) {
+            gOrigProtoCanInit = ProbeReplaceMethod(protoCls, @selector(canInitWithRequest:),
+                                                   (IMP)ProbeProtoCanInitWithRequest, "B@:@@");
+            gOrigProtoStart = ProbeReplaceMethod(protoCls, @selector(startLoading),
+                                                 (IMP)ProbeProtoStartLoading, "v@:");
+        } else {
+            PLog(@"hook", @"✗ NSURLProtocol 不在运行时（异常）");
+        }
+        Class connCls = NSClassFromString(@"NSURLConnection");
+        if (connCls) {
+            gOrigConnInit = ProbeReplaceMethod(connCls,
+                                               @selector(initWithRequest:delegate:startImmediately:),
+                                               (IMP)ProbeConnInitWithRequest, "@@:@@@B");
+        }
+        if (auCls) {
+            gOrigAssetClassURL = ProbeReplaceMethod(object_getClass(auCls),
+                                                    @selector(URLAssetWithURL:options:),
+                                                    (IMP)ProbeAssetClassWithURL, "@@:@@");
+        }
+        // 列出运行时里所有 NSURLProtocol 子类 —— 直接看 App 注册了哪些自定义协议
+        {
+            int n = objc_getClassList(NULL, 0);
+            Class *cs = (Class *)malloc(sizeof(Class) * (size_t)n);
+            if (cs) {
+                n = objc_getClassList(cs, n);
+                NSMutableArray<NSString *> *subs = [NSMutableArray array];
+                Class base = NSClassFromString(@"NSURLProtocol");
+                for (int i = 0; i < n; i++) {
+                    Class c = cs[i];
+                    if (c == base) continue;
+                    Class s = class_getSuperclass(c);
+                    while (s) { if (s == base) { [subs addObject:NSStringFromClass(c)]; break; } s = class_getSuperclass(s); }
+                }
+                free(cs);
+                PLog(@"hook", @"运行时 NSURLProtocol 子类 %lu 个：%@",
+                     (unsigned long)subs.count,
+                     subs.count ? [subs componentsJoinedByString:@", "] : @"(无)");
+            }
+        }
+
         // ②c 视频字节的实际下载器（依据 classes.txt 的真实方法表）
         Class dlCls = NSClassFromString(@"BBRMediaDownloader");
         if (dlCls) {            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
@@ -1271,13 +1399,14 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 beats++;
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 委托类=%d setDelegate=%d "
                               @"shouldWait=%d | NSURLSession=%d NSURLRequest=%d | "
-                              @"下载器=%d 段级下载=%d | 预加载=%d",
+                              @"下载器=%d 段级下载=%d | 预加载=%d | URLProtocol=%d/%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
                      ProbeRead(&gCntShouldWait),
                      ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed),
                      ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask),
-                     ProbeRead(&gCntPreloadCall));
+                     ProbeRead(&gCntPreloadCall),
+                     ProbeRead(&gCntProtocolCanInit), ProbeRead(&gCntProtocolStart));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);

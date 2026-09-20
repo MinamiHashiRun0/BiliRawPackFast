@@ -1,24 +1,29 @@
-fix(probe): 缓存盘点改为递归逐层统计 —— 上一版路径拼错、只看一层
+feat(probe): 补上 NSURLProtocol —— 我此前不该漏的一层
 
-真机（第五次会话，构建 15db232）实测：
-  [cache] Library 合计 680,977,230 字节（649.43 MB）
-            [目录] Library   636,542,957 字节   ← 视频缓存极可能在这里
-            [目录] Documents  30,434,788 字节
-            [目录] tmp        13,999,485 字节
-  [cache] Library/Caches 不存在: …/<container>/Caches   ← 路径拼错两层
+先承认判断失误：
+  上一轮我把「AVURLAsset=0」解释成「用户没点进播放页」。这个推断站不住脚 ——
+  占位视频只创建一次就被缓存，重复会话不会再出现；竖屏信息流播放器也可能
+  根本不用 AVURLAsset。用户明确回复「点进竖屏刷了一分半」，即有 90 秒真实
+  视频流量，而我一个钩子都没抓到。缺口在我的观测面，不在用户的操作。
 
-  同时 AVURLAsset=0（上一轮为 1，是 blank.mp4 占位），
-  预加载=0，全部网络计数与上轮相同（NSURLSession=1 NSURLRequest=10 均为启动 API）。
-  需用户确认这次是否真的点进了播放页。
+因此本轮调整优先级：链路尚未定位之前，观测覆盖面优先于「零行为改动的洁癖」。
+新增（均为纯观测，记录后原样转发）：
 
-修复：
-  * 用 NSSearchPathForDirectoriesInDomains(NSCachesDirectory…) 取 Caches 路径，
-    不再手工拼接（上一版拼错两层，等于什么都没看到）
-  * 新增 ProbeScanTree()：对每个一级子项**递归**求和 + 文件计数，按体积排序输出 Top N
-  * 盘点范围：Library 一级、Caches 一级、Caches 下每个子目录各一层、Documents 一级
-    —— 636MB 到底装在哪，这次会直接列出
-  * 删除已被取代的 ProbeListDir()（非递归版，会触发 -Wunused-function）
+  * NSURLProtocol - canInitWithRequest:
+      任何经 NSURLSession/NSURLConnection 的请求都会先问这里；
+      只在该 protocol **认领**了媒体请求时记录，避免刷屏
+  * NSURLProtocol - startLoading
+      自定义 protocol 实际开始加载
+  * NSURLConnection - initWithRequest:delegate:startImmediately:
+  * AVURLAsset 类方法 + URLAssetWithURL:options:（此前只钩了实例 init）
+  * 启动时枚举运行时全部 NSURLProtocol 子类并写入日志
+    —— 直接看 App 注册了哪些自定义协议（二进制里已知存在
+       BFCFeVideoURLProtocol / BFCFeFileURLProtocol / BWAFileURLProtocol 等）
 
-过程记录：用 PowerShell Set-Content 改文件时被写成 CRLF，
-本地 preflight 的行尾检查当场拦下（1323 处），已转回 LF。
-这说明该闸门确实在起作用。
+[verdict] 新增最高优先级分支：
+  URLProtocol 认领/启动 > 0  → ★★ 落点确定，就是这些 protocol 类
+心跳行同步输出 URLProtocol=认领/启动 两个计数。
+
+至此观测面 15 个点：AVAssetResourceLoader×1、NSURLSession×2、NSURLRequest×3、
+NSURLProtocol×2、NSURLConnection×1、AVURLAsset×2、BBRMediaDownloader×2、
+BBPlayerPreload×1、缓存盘点×1。
