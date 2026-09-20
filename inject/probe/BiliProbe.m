@@ -394,11 +394,14 @@ static BOOL ProbeHostLooksLikeMedia(NSURL *url) {
     if (!url) return NO;
     NSString *host = url.host;
     if (host.length == 0) return NO;
-    // 用 lowercaseString 一次，避免多次大小写不敏感比较
     static NSArray<NSString *> *needles = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        needles = @[@"bilivideo", @"mcdn", @"akamai", @"hdslb", @"upos"];
+        // 加入回环地址：IJKP2PManager 有 +getHttpServerPort，说明 P2P 在本地起 HTTP 服务，
+        // 播放器从 127.0.0.1:<port> 读数据。此前的过滤器把它排除在外，
+        // 于是即使有请求也不会被记录 —— 这是之前一直"什么都抓不到"的可能原因之一。
+        needles = @[@"bilivideo", @"mcdn", @"akamai", @"hdslb", @"upos",
+                    @"127.0.0.1", @"localhost", @"::1"];
     });
     for (NSString *n in needles) {
         if ([host rangeOfString:n options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
@@ -855,6 +858,77 @@ static id ProbeAssetClassWithURL(id self, SEL _cmd, NSURL *URL, NSDictionary *op
     return nil;
 }
 
+//=== 3d. IJK 播放器链路 —— 从本地类转储挖到的真实落点 ==========================
+// 依据（classes.txt 真实方法表，非猜测）：
+//   IJKFFMoviePlayerController   只有 initWithContentURL:withOptions:
+//                                **没有** initWithContentURL: → FFmpeg 内核直读，不经 AVPlayer
+//   IJKMediaPlayerWrapper        - prepareWithItem: / switchItem:     喂给内核
+//   IJKMediaPlayerItem           - parseDash:videoId:audioId: / getResolverData:video:audio:
+//   IJKDashStreamItem            - initWithStreamId:bandwidth:baseUrl:fileSize:...
+//                                - baseUrl / backupUrl0 / backupUrl1   ← CDN URL 就挂在这里
+//   IJKDashStreamBridge          - initWithMediaType:codecId:qn:bandwidth:url:backupUrls:
+//   IJKP2PManager                + getHttpServerPort（P2P 起本地 HTTP 服务）
+// 这一层是**唯一能同时看到真实 CDN URL 与本地回环地址**的地方，
+// 也是阶段 2「改 host / 多 CDN 池」最干净的注入点。
+
+static _Atomic(int32_t) gCntStreamItemInit = 0;
+static _Atomic(int32_t) gCntParseDash     = 0;
+static _Atomic(int32_t) gCntPrepareWithItem = 0;
+
+static IMP gOrigStreamItemInit = NULL;
+static IMP gOrigParseDash      = NULL;
+static IMP gOrigPrepareItem    = NULL;
+
+/// 只打印 host 列表，不打印完整签名 URL（避免刷屏与泄露 token）
+static NSString *ProbeHostsOfURLStrings(id urls) {
+    if (!urls) return @"(nil)";
+    NSMutableArray *hosts = [NSMutableArray array];
+    if ([urls isKindOfClass:NSArray.class]) {
+        for (id u in urls) {
+            if ([u isKindOfClass:NSString.class] || [u isKindOfClass:NSURL.class]) {
+                NSURL *nu = [u isKindOfClass:NSURL.class] ? u : [NSURL URLWithString:u];
+                [hosts addObject:nu.host ?: @"?"];
+            }
+        }
+    } else if ([urls isKindOfClass:NSString.class] || [urls isKindOfClass:NSURL.class]) {
+        NSURL *nu = [urls isKindOfClass:NSURL.class] ? urls : [NSURL URLWithString:urls];
+        [hosts addObject:nu.host ?: @"?"];
+    }
+    return hosts.count ? [hosts componentsJoinedByString:@", "] : @"(空)";
+}
+
+static id ProbeStreamItemInit(id self, SEL _cmd, int streamId, int bandwidth, id baseUrl,
+                              long long fileSize, int streamType, int codecType) {
+    ProbeBump(&gCntStreamItemInit);
+    PLog(@"ijk", @"★ IJKDashStreamItem streamId=%d bw=%d size=%lld type=%d codec=%d\n"
+                 @"          baseUrl host = %@",
+         streamId, bandwidth, fileSize, streamType, codecType,
+         ProbeHostsOfURLStrings(baseUrl));
+    if (gOrigStreamItemInit) {
+        return ((id (*)(id, SEL, int, int, id, long long, int, int))gOrigStreamItemInit)
+            (self, _cmd, streamId, bandwidth, baseUrl, fileSize, streamType, codecType);
+    }
+    return nil;
+}
+
+static void ProbeParseDash(id self, SEL _cmd, id dash, int videoId, int audioId) {
+    ProbeBump(&gCntParseDash);
+    PLog(@"ijk", @"★ IJKMediaPlayerItem parseDash videoId=%d audioId=%d dash=%@",
+         videoId, audioId, dash ? NSStringFromClass([dash class]) : @"(nil)");
+    if (gOrigParseDash) {
+        ((void (*)(id, SEL, id, int, int))gOrigParseDash)(self, _cmd, dash, videoId, audioId);
+    }
+}
+
+static void ProbePrepareWithItem(id self, SEL _cmd, id item) {
+    ProbeBump(&gCntPrepareWithItem);
+    PLog(@"ijk", @"★ IJKMediaPlayerWrapper prepareWithItem: %@  ← 即将交给 FFmpeg 内核",
+         item ? NSStringFromClass([item class]) : @"(nil)");
+    if (gOrigPrepareItem) {
+        ((void (*)(id, SEL, id))gOrigPrepareItem)(self, _cmd, item);
+    }
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -1055,21 +1129,26 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t preloads    = ProbeRead(&gCntPreloadCall);
     int32_t protos      = ProbeRead(&gCntProtocolCanInit);
     int32_t protoStarts = ProbeRead(&gCntProtocolStart);
+    int32_t ijkStreams  = ProbeRead(&gCntStreamItemInit);
+    int32_t ijkDashes   = ProbeRead(&gCntParseDash);
+    int32_t ijkPrepared = ProbeRead(&gCntPrepareWithItem);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
                      @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d "
-                     @"| 预加载=%d | ★URLProtocol认领=%d 启动=%d",
+                     @"| 预加载=%d | URLProtocol=%d/%d | ★IJK流=%d parseDash=%d 准备=%d",
          hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
-         preloads, protos, protoStarts);
+         preloads, protos, protoStarts, ijkStreams, ijkDashes, ijkPrepared);
 
-    if (protoStarts > 0 || protos > 0) {
-        PLog(@"verdict", @"★★ 找到了！NSURLProtocol 认领=%d 启动=%d —— "
-                         @"视频字节走的是自定义 URLProtocol。"
-                         @"阶段 2/3 的落点就是这些 protocol 类（见 [protocol] 行）",
-             protos, protoStarts);
+    if (ijkStreams > 0 || ijkDashes > 0 || ijkPrepared > 0) {
+        PLog(@"verdict", @"★★★ 找到了！IJK 播放链路命中：DashStreamItem=%d parseDash=%d "
+                         @"prepareWithItem=%d → 阶段 2/3 落点就是这里"
+                         @"（改 baseUrl/backupUrl 的 host，见 [ijk] 行）",
+             ijkStreams, ijkDashes, ijkPrepared);
+    } else if (protoStarts > 0 || protos > 0) {
+        PLog(@"verdict", @"★★ 找到了！NSURLProtocol 认领=%d 启动=%d", protos, protoStarts);
     } else if (dlTask > 0) {
         PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 落点 BBRMediaDownloader", dlTask);
     } else if (preloads > 0) {
@@ -1399,9 +1478,51 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             }
         }
 
-        // ②c 视频字节的实际下载器（依据 classes.txt 的真实方法表）
+        // ②g IJK 播放链路（从本地类转储挖到的真实落点）
+        Class siCls = NSClassFromString(@"IJKDashStreamItem");
+        if (siCls) {
+            gOrigStreamItemInit = ProbeReplaceMethod(
+                siCls, @selector(initWithStreamId:bandwidth:baseUrl:fileSize:streamType:codecType:),
+                (IMP)ProbeStreamItemInit, "@@:ii@qii");
+        } else {
+            PLog(@"hook", @"· IJKDashStreamItem 不在运行时");
+        }
+        Class miCls = NSClassFromString(@"IJKMediaPlayerItem");
+        if (miCls) {
+            gOrigParseDash = ProbeReplaceMethod(miCls, @selector(parseDash:videoId:audioId:),
+                                                (IMP)ProbeParseDash, "v@:@ii");
+        } else {
+            PLog(@"hook", @"· IJKMediaPlayerItem 不在运行时");
+        }
+        Class mwCls = NSClassFromString(@"IJKMediaPlayerWrapper");
+        if (mwCls) {
+            gOrigPrepareItem = ProbeReplaceMethod(mwCls, @selector(prepareWithItem:),
+                                                  (IMP)ProbePrepareWithItem, "v@:@");
+        } else {
+            PLog(@"hook", @"· IJKMediaPlayerWrapper 不在运行时");
+        }
+        // 顺带打印 P2P 本地服务端口，验证「播放器读 127.0.0.1」这个假设
+        Class p2pMgr = NSClassFromString(@"IJKP2PManager");
+        if (p2pMgr) {
+            NSInteger port = 0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            if ([p2pMgr respondsToSelector:NSSelectorFromString(@"getHttpServerPort")]) {
+                id r = [p2pMgr performSelector:NSSelectorFromString(@"getHttpServerPort")];
+                port = [r integerValue];
+            }
+#pragma clang diagnostic pop
+            PLog(@"hook", @"· IJKP2PManager 存在，getHttpServerPort=%ld"
+                          @"（非 0 则说明 P2P 本地 HTTP 服务在跑，播放器可能读 127.0.0.1）",
+                 (long)port);
+        } else {
+            PLog(@"hook", @"· IJKP2PManager 不在运行时");
+        }
+
+        // ②c 视频字节下载器（若走 BBRMediaDownloader 这条路）
         Class dlCls = NSClassFromString(@"BBRMediaDownloader");
-        if (dlCls) {            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
+        if (dlCls) {
+            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
                                                 (IMP)ProbeDLInitWithURL, "@@:@@@");
             gOrigDLTask = ProbeReplaceMethod(dlCls, @selector(downloadTaskFromOffset:length:toEnd:),
                                              (IMP)ProbeDLTaskFromOffset, "v@:QQB");
