@@ -1,0 +1,389 @@
+03:43:01.262 [boot] ================ BiliProbe 已加载 ================
+03:43:01.269 [boot] 构建 SHA=a9e542f  构建时间=2026-09-20T19:39:58Z  编译于 Sep 20 2026 19:40:01
+03:43:01.269 [boot] 观测点清单：AVAssetResourceLoader / NSURLSession×2 / NSURLRequest×3 / BBRMediaDownloader×2
+03:43:01.269 [boot] 主程序=/private/var/containers/Bundle/Application/1A73F589-E207-4F4A-9BE2-1614971E4054/bili-universal.app/bili-universal PID=11857
+03:43:01.274 [io] ✓ 已写 environment.txt (847 字节)
+03:43:01.274 [env] 自检完成：系统 iOS 27.0 / 镜像 1283 个
+03:43:01.274 [hook] ✓ 已替换 AVAssetResourceLoader :: setDelegate:queue:
+03:43:01.274 [hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:completionHandler:
+03:43:01.274 [hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:
+03:43:01.274 [hook] ✓ 已替换 NSURLRequest :: initWithURL:
+03:43:01.274 [hook] ✗ NSURLRequest 上 initWithURLString: 不存在，跳过
+03:43:01.274 [hook] ✓ 已替换 NSURLRequest :: requestWithURL:
+03:43:01.275 [hook] ✓ 已替换 AVURLAsset :: initWithURL:options:
+03:43:01.275 [hook] ✓ 已替换 AVURLAsset :: resourceLoader
+03:43:01.275 [hook] ✓ 已替换 BBPlayerPreload :: preloadItems:unite:
+03:43:01.275 [hook] ✗ NSURLProtocol 上 canInitWithRequest: 不存在，跳过
+03:43:01.275 [hook] ✓ 已替换 NSURLProtocol :: startLoading
+03:43:01.275 [hook] ✓ 已替换 NSURLConnection :: initWithRequest:delegate:startImmediately:
+03:43:01.275 [hook] ✓ 已替换 AVURLAsset :: URLAssetWithURL:options:
+03:43:01.561 [hook] 运行时 NSURLProtocol 子类 34 个：TXYHyURLProtocol, BWAFileURLProtocol, CPURLProtocol, _NSCFURLProtocol, _NSURLAppSSOProtocol, _NSURLFileProtocol, _NSURLFTPProtocol, _NSURLDataProtocol, _NSURLHTTPProtocol, NSAboutURLProtocol, _NSCFWikipediaProtocol, _NSCFTranslatedFileURLProtocol, _NSCFTranslatedFileURLProtocol_PIMPL_7, _NSCFTranslatedFileURLProtocol_PIMPL_6, _NSCFTranslatedFileURLProtocol_PIMPL_5, _NSCFTranslatedFileURLProtocol_PIMPL_4, _NSCFTranslatedFileURLProtocol_PIMPL_3, _NSCFTranslatedFileURLProtocol_PIMPL_2, _NSCFTranslatedFileURLProtocol_PIMPL_1, _NSCFTranslatedFileURLProtocol_PIMPL_0, AAURLProtocol, AMSMockNetworkProxy, AppleMediaServices.MockNetworkProxy, WKCustomProtocol, FCExcerptURLProtocol, FCRecordFieldURLProtocol, FCMockURLProtocol, FCPuzzleThumbnailURLProtocol, QLPreviewURLProtocol, QLPreviewConverterURLProtocol, QLPreviewMultiPartURLProtocol, MPHomeSharingURLProtocol, MFMessageURLProtocol, MusicKit.ArtworkLoadingProtocol
+03:43:01.561 [hook] · IJKDashStreamItem 存在
+03:43:01.562 [hook] · IJKMediaPlayerItem 存在
+03:43:01.562 [hook] · IJKMediaPlayerWrapper 存在
+03:43:01.562 [hook] · IJKFFMoviePlayerController 存在
+03:43:01.562 [hook] · IJKFFMoviePlayerControllerAVPlayer 存在
+03:43:01.562 [hook] · IJKP2PManager 存在
+03:43:01.562 [hook] · IJKP2PGRPCClient 存在
+03:43:01.562 [hook] · IJKDashStreamBridge 存在
+03:43:01.562 [hook] · IJKP2PManager 响应 getHttpServerPort=YES（响应即说明有本地 HTTP 服务；刻意不取数值，签名未知）
+03:43:01.562 [hook] ✓ 已替换 BBRMediaDownloader :: initWithURL:cacheWorker:
+03:43:01.562 [hook] ✓ 已替换 BBRMediaDownloader :: downloadTaskFromOffset:length:toEnd:
+03:43:01.562 [hook] · BGMFragmentP2pDownloader2 存在（P2P 分支可用，若 mediadl 计数为 0 则视频走它）
+03:43:01.562 [boot] 探针安装完毕，等待播放器触发…
+03:43:01.562 [boot] 心跳已启动：每 15 秒一次；侦察结束时与 45 秒后各强制写一份结论
+03:43:01.562 [verdict] =========== 结论 [启动即写（此时尚未播放，仅供参考）] ===========
+03:43:01.562 [verdict] 计数：委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=0 NSURLRequest=0 | 下载器init=0 段级下载=0 | AVURLAsset=0 加载器类=0 | 预加载=0 | URLProtocol=0/0
+03:43:01.562 [verdict] 未命中 全部观测点仍为零（含 NSURLProtocol/NSURLConnection）。AVURLAsset=0 预加载=0 —— 若确实在播视频，说明字节完全不经 URL 系 API，属真正的自研传输栈
+03:43:01.563 [verdict] =======================================
+03:43:01.904 [request] NSURLRequest requestWithURL host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/fawkes/dd/prod/iphone.zip
+03:43:01.904 [request] NSURLRequest initWithURL host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/fawkes/dd/prod/iphone.zip
+03:43:01.904 [session] 媒体请求 method=GET host=i0.hdslb.com range=(无)
+          URL=https://i0.hdslb.com/bfs/fawkes/dd/prod/iphone.zip
+03:43:03.576 [scan] 开始运行时侦察…
+03:43:03.782 [resloader]   ✔ 实现者: IJKFFMoviePlayerControllerAVPlayer
+03:43:03.820 [resloader]   ✔ 实现者: BBRResourceLoaderManager
+03:43:03.823 [resloader]   ✔ 实现者: BBLiveBaseResourceLoaderManager
+03:43:03.829 [resloader]   ✔ 实现者: BGMMediaRequestTask
+03:43:03.858 [resloader]   ✔ 实现者: BLKTTSMediaRequestTask
+03:43:03.877 [resloader]   ✔ 实现者: BBUperVIResourceLoaderManager
+03:43:04.336 [cache] 路径：container=/var/mobile/Containers/Data/Application  library=/var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C  caches=/var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches
+03:43:05.204 [resloader]   ✔ 实现者: CloudAsset.LoadingRequestHandler
+03:43:09.597 [resloader]   ✔ 实现者: MADAVAssetResourceLoaderDelegate
+03:43:12.209 [resloader]   ✔ 实现者: WebCoreSharedBufferResourceLoaderDelegate
+03:43:12.210 [resloader]   ✔ 实现者: WebCoreAudioFileReaderLoaderDelegate
+03:43:12.222 [resloader]   ✔ 实现者: WebCoreAVFLoaderDelegate
+03:43:12.294 [resloader]   ✔ 实现者: LPAudio
+03:43:12.295 [resloader]   ✔ 实现者: LPVideo
+03:43:13.383 [resloader]   ✔ 实现者: FCAVAssetResourceLoader
+03:43:14.927 [resloader]   ✔ 实现者: VCPInMemoryAVAsset
+03:43:15.396 [io] ✓ 已写 resloader-delegates.txt (465 字节)
+03:43:15.616 [cdn] 命中: BFCBandwidthManager (2 个选择子)
+03:43:15.802 [cdn] 命中: BBUperUploadNetworkTool (2 个选择子)
+03:43:15.875 [cdn] 命中: BGMMasterListProcessor (1 个选择子)
+03:43:15.879 [cdn] 命中: BGMFragmentDownloader (1 个选择子)
+03:43:15.880 [cdn] 命中: BGMFragmentContext (2 个选择子)
+03:43:15.940 [cdn] 命中: BBLivePlayerP2PServerItem (1 个选择子)
+03:43:15.942 [cdn] 命中: BBLivePlayerResolverHelper (1 个选择子)
+03:43:16.563 [beat] 第 1 次心跳（约 15 秒）| 委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器=0 段级下载=0 | 预加载=0 | URLProtocol=0/0
+03:43:20.754 [cdn] 命中: BBLiveBCQualityComponent (2 个选择子)
+03:43:21.086 [io] ✓ 已写 cdn-selectors.txt (751 字节)
+03:43:23.196 [classes] 类侦察完成：枚举 148936 个类，命中记录 4000 个
+03:43:23.215 [io] ✓ 已写 classes.txt (2821097 字节)
+03:43:23.216 [scan] 运行时侦察完成。日志目录：/var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Documents/biliprobe
+03:43:23.216 [verdict] =========== 结论 [侦察完成] ===========
+03:43:23.216 [verdict] 计数：委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器init=0 段级下载=0 | AVURLAsset=0 加载器类=0 | 预加载=0 | URLProtocol=0/0
+03:43:23.217 [verdict] 未命中 全部观测点仍为零（含 NSURLProtocol/NSURLConnection）。AVURLAsset=0 预加载=0 —— 若确实在播视频，说明字节完全不经 URL 系 API，属真正的自研传输栈
+03:43:23.217 [verdict] =======================================
+03:43:31.563 [beat] 第 2 次心跳（约 30 秒）| 委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器=0 段级下载=0 | 预加载=0 | URLProtocol=0/0
+03:43:35.859 [cache] ===== Library 下各一级项 =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C
+ 合计 656.55 MB，5 个一级项
+  [目录] Library    642648727 字节  13833 个文件
+  [目录] Documents     38331728 字节  155 个文件
+  [目录] tmp      7466762 字节  219 个文件
+  [文件] .com.apple.mobile_container_manager.metadata.plist            0 字节  1 个文件
+  [目录] SystemData            0 字节  0 个文件
+
+03:43:36.180 [cache] ===== Library/Documents =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Documents
+ 合计 39.63 MB，36 个一级项
+  [目录] .Trash     17464546 字节  32 个文件
+  [目录] BBPhoneThemes      6345456 字节  17 个文件
+  [目录] BLog      4478395 字节  1 个文件
+  [目录] BrandSplash      4455629 字节  24 个文件
+  [目录] db      3293184 字节  2 个文件
+  [目录] biliprobe      2839437 字节  5 个文件
+  [目录] WebApplet      1781534 字节  19 个文件
+  [目录] localThemes       255136 字节  3 个文件
+  [目录] com.bilibili.bcm       159744 字节  9 个文件
+  [目录] reportv2        71079 字节  3 个文件
+  [目录] live        66653 字节  13 个文件
+  [目录] database        57496 字节  4 个文件
+  …
+
+03:43:46.562 [beat] 第 3 次心跳（约 45 秒）| 委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器=0 段级下载=0 | 预加载=0 | URLProtocol=0/0
+03:43:46.563 [verdict] =========== 结论 [45 秒] ===========
+03:43:46.563 [verdict] 计数：委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器init=0 段级下载=0 | AVURLAsset=0 加载器类=0 | 预加载=0 | URLProtocol=0/0
+03:43:46.563 [verdict] 未命中 全部观测点仍为零（含 NSURLProtocol/NSURLConnection）。AVURLAsset=0 预加载=0 —— 若确实在播视频，说明字节完全不经 URL 系 API，属真正的自研传输栈
+03:43:46.563 [verdict] =======================================
+03:43:57.123 [cache] ===== Library/Library =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library
+ 合计 613.34 MB，15 个一级项
+  [目录] Application Support    594860978 字节  13171 个文件
+  [目录] Caches     34938465 字节  537 个文件
+  [目录] SplashBoard      7962672 字节  2 个文件
+  [目录] tv.danmaku.bilianime1      2424126 字节  17 个文件
+  [目录] Preferences      2224102 字节  82 个文件
+  [目录] WebKit       360604 字节  16 个文件
+  [目录] Foom       163840 字节  1 个文件
+  [目录] HTTPStorages        82216 字节  3 个文件
+  [目录] 81453740.image.emoji.com.bilibili.BBLink        53248 字节  3 个文件
+  [目录] 0.image.emoji.com.bilibili.BBLink        20480 字节  1 个文件
+  [文件] 0_BBLinkEmojiImageKeyKVDBName.db        16384 字节  1 个文件
+  [文件] 81453740_BBLinkEmojiImageKeyKVDBName.db        16384 字节  1 个文件
+  …
+
+03:43:57.133 [cache] Library/SystemData 列举失败: 未能打开文件“SystemData”，因为你没有查看它的权限。
+03:43:57.430 [cache] ===== Library/tmp =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/tmp
+ 合计 8.88 MB，12 个一级项
+  [目录] dash_cache      3869073 字节  10 个文件
+  [目录] cron      3280270 字节  207 个文件
+  [目录] cron.bilibili.com      1080129 字节  1 个文件
+  [目录] main.cron.bilibili.com      1080129 字节  1 个文件
+  [目录] bbmallcache            0 字节  0 个文件
+  [目录] instrument            0 字节  0 个文件
+  [目录] ijkvideo            0 字节  0 个文件
+  [目录] p2p_cache            0 字节  0 个文件
+  [目录] com.apple.WebKit.GPU            0 字节  0 个文件
+  [目录] WebKit            0 字节  0 个文件
+  [目录] com.apple.WebKit.Networking            0 字节  0 个文件
+  [目录] cdn_cache            0 字节  0 个文件
+
+03:43:57.432 [cache] ===== 沙盒内最大文件 Top 40（>=256KB，扫了 0 个）=====
+  (没有 >=256KB 的文件)
+
+03:43:57.434 [cache] p2p_proxy.json 内容：{"code":0,"message":"0","ttl":1,"data":{"trackers":["ali-edge-v2.solseed.cn","ali-edge-v2.solseed.cn","hw-edge-v2.solseed.cn"],"live_trackers":null,"stuns":["113.44.12.214:3478","124.70.180.79:3478","124.64.207.201:3478","49.7.105.198:3478","39.156.134.92:3478","111.202.18.87:3478","171.15.136.217:3478","183.204.78.150:3478"],"stun6s":["[2409:8c44:2:ff1f:3e87:34bd:2de0:777b]:3478","[2402:4e00:140c:a000:0:9e07:64a2:a587]:3478","[2402:4e00:140c:a000:0:9e09:4847:20f3]:3478","[2402:4e00:1208:8e00:0:9e09:4128:2218]:3478","[2402:4e00:1208:8e00:0:9e09:4c67:932e]:3478","[2402:4e00:1208:8e00:0:9e09:405
+03:43:58.202 [cache] ===== Caches 下各一级项 =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches
+ 合计 33.37 MB，37 个一级项
+  [目录] com.apple.dyld     10413253 字节  1 个文件
+  [目录] WebKit      7401840 字节  150 个文件
+  [目录] com.bilibili.webimage      7258502 字节  243 个文件
+  [目录] tv.danmaku.bilianime1      3676899 字节  22 个文件
+  [目录] com.bilibili.PullToRefreshResouce      1313067 字节  4 个文件
+  [目录] Logs      1224781 字节  9 个文件
+  [目录] BLog      1064960 字节  1 个文件
+  [目录] com.bilibili.neuron      1017360 字节  3 个文件
+  [目录] live       423259 字节  57 个文件
+  [目录] apm_net_log       355081 字节  9 个文件
+  [目录] BBPgcImagePreloadManager       333056 字节  3 个文件
+  [目录] com.apple.WebKit.GPU       265664 字节  5 个文件
+  [目录] bbmallcache        56916 字节  9 个文件
+  [目录] com.bilibili.webimage.player.preview        53248 字节  3 个文件
+  [目录] hilo_offline        18289 字节  1 个文件
+  [目录] inlineV2-seekBar-lottie-animations        17452 字节  2 个文件
+  [目录] player-lottie-animations-story        17452 字节  2 个文件
+  [文件] com.bilibili.edu.storage.81453740        16384 字节  1 个文件
+  [文件] BFCApiCacheKVDBName        16384 字节  1 个文件
+  [文件] com.bilibili.edu.storage.0        16384 字节  1 个文件
+  [文件] com.bilibili.history.cloud.sync        16384 字节  1 个文件
+  [目录] image_cache_kntr         4547 字节  3 个文件
+  [文件] BBPlayerDMFilterUserModel.dat         3124 字节  1 个文件
+  [文件] heartbeat.v2.cache         1784 字节  1 个文件
+  [目录] BFC         1129 字节  2 个文件
+  …
+
+03:43:58.206 [cache] ===== Caches/BLog =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/BLog
+ 合计 1.02 MB，1 个一级项
+  [目录] cache      1064960 字节  1 个文件
+
+03:43:58.207 [cache] ===== Caches/p2p_config =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/p2p_config
+ 合计 0.00 MB，1 个一级项
+  [文件] p2p_proxy.json          706 字节  1 个文件
+
+03:43:58.213 [cache] ===== Caches/BBPgcImagePreloadManager =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/BBPgcImagePreloadManager
+ 合计 0.32 MB，5 个一级项
+  [文件] manifest.sqlite-wal       214272 字节  1 个文件
+  [文件] manifest.sqlite        86016 字节  1 个文件
+  [文件] manifest.sqlite-shm        32768 字节  1 个文件
+  [目录] trash            0 字节  0 个文件
+  [目录] data            0 字节  0 个文件
+
+03:43:58.227 [cache] ===== Caches/bbmallcache =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/bbmallcache
+ 合计 0.05 MB，1 个一级项
+  [目录] mall_log        56916 字节  9 个文件
+
+03:43:58.228 [cache] ===== Caches/player-lottie-animations =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/player-lottie-animations
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.229 [cache] ===== Caches/errOrderV2 =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/errOrderV2
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.520 [cache] ===== Caches/com.bilibili.webimage =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.bilibili.webimage
+ 合计 6.92 MB，1 个一级项
+  [目录] images      7258502 字节  243 个文件
+
+03:43:58.522 [cache] ===== Caches/bfc_tracker_crash_flag_apm =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/bfc_tracker_crash_flag_apm
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.522 [cache] ===== Caches/p2p_cache =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/p2p_cache
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.558 [cache] ===== Caches/tv.danmaku.bilianime1 =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/tv.danmaku.bilianime1
+ 合计 3.51 MB，8 个一级项
+  [文件] Cache.db-wal      2430832 字节  1 个文件
+  [目录] com.apple.metal       616056 字节  4 个文件
+  [文件] Cache.db       352256 字节  1 个文件
+  [目录] fsCachedData       128851 字节  10 个文件
+  [目录] com.apple.opengl       116136 字节  4 个文件
+  [文件] Cache.db-shm        32768 字节  1 个文件
+  [目录] com.apple.gpuarchiver            0 字节  0 个文件
+  [目录] com.apple.metalfe            0 字节  1 个文件
+
+03:43:58.559 [cache] ===== Caches/glog =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/glog
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.562 [cache] ===== Caches/hilo_offline =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/hilo_offline
+ 合计 0.02 MB，1 个一级项
+  [文件] manifest.json        18289 字节  1 个文件
+
+03:43:58.564 [cache] ===== Caches/com.apple.dyld =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.apple.dyld
+ 合计 9.93 MB，1 个一级项
+  [文件] bili-universal.dyld4     10413253 字节  1 个文件
+
+03:43:58.573 [cache] ===== Caches/com.apple.WebKit.GPU =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.apple.WebKit.GPU
+ 合计 0.25 MB，4 个一级项
+  [目录] 32024       131908 字节  2 个文件
+  [文件] functions.data       131072 字节  1 个文件
+  [文件] functions.list         2684 字节  1 个文件
+  [文件] modules.timestamp            0 字节  1 个文件
+
+03:43:58.576 [cache] ===== Caches/com.apple.nsurlsessiond =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.apple.nsurlsessiond
+ 合计 0.00 MB，1 个一级项
+  [目录] Downloads            0 字节  0 个文件
+
+03:43:58.585 [cache] ===== Caches/com.bilibili.PullToRefreshResouce =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.bilibili.PullToRefreshResouce
+ 合计 1.25 MB，5 个一级项
+  [目录] data      1243307 字节  1 个文件
+  [文件] manifest.sqlite-shm        32768 字节  1 个文件
+  [文件] manifest.sqlite        20480 字节  1 个文件
+  [文件] manifest.sqlite-wal        16512 字节  1 个文件
+  [目录] trash            0 字节  0 个文件
+
+03:43:58.588 [cache] ===== Caches/inlineV2-seekBar-lottie-animations =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/inlineV2-seekBar-lottie-animations
+ 合计 0.02 MB，2 个一级项
+  [文件] 5648c2926c1c93eb2d30748994ba7b96.json        10053 字节  1 个文件
+  [文件] 31df8ce99de871afaa66a7a78f44deec.json         7399 字节  1 个文件
+
+03:43:58.601 [cache] ===== Caches/Logs =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/Logs
+ 合计 1.17 MB，9 个一级项
+  [文件] tv.danmaku.bilianime1 2026-09-21--01-21-12-912.log      1172148 字节  1 个文件
+  [文件] .mmap        51200 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-07-59-921.log          239 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--03-23-37-331.log          239 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-19-14-912.log          239 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-40-44-195.log          239 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-01-38-414.log          239 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-30-01-427.log          238 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--03-43-09-446.log            0 字节  1 个文件
+
+03:43:58.602 [cache] ===== Caches/bfc_tracker_crash_all_flag_apm =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/bfc_tracker_crash_all_flag_apm
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.689 [cache] ===== Caches/live =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/live
+ 合计 0.40 MB，2 个一级项
+  [目录] caches       423259 字节  57 个文件
+  [目录] chronos            0 字节  0 个文件
+
+03:43:58.927 [cache] ===== Caches/WebKit =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/WebKit
+ 合计 7.06 MB，4 个一级项
+  [目录] NetworkCache      7340216 字节  146 个文件
+  [目录] AlternativeServices        61616 字节  3 个文件
+  [目录] CacheStorage            8 字节  1 个文件
+  [目录] HSTS            0 字节  0 个文件
+
+03:43:58.933 [cache] ===== Caches/com.bilibili.neuron =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.bilibili.neuron
+ 合计 0.97 MB，5 个一级项
+  [文件] manifest.sqlite-wal       964112 字节  1 个文件
+  [文件] manifest.sqlite-shm        32768 字节  1 个文件
+  [文件] manifest.sqlite        20480 字节  1 个文件
+  [目录] trash            0 字节  0 个文件
+  [目录] data            0 字节  0 个文件
+
+03:43:58.938 [cache] ===== Caches/image_cache_kntr =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/image_cache_kntr
+ 合计 0.00 MB，3 个一级项
+  [文件] -905781447.0         2261 字节  1 个文件
+  [文件] -578926167.0         2177 字节  1 个文件
+  [文件] journal          109 字节  1 个文件
+
+03:43:58.939 [cache] ===== Caches/im =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/im
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.946 [cache] ===== Caches/com.bilibili.webimage.player.preview =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.bilibili.webimage.player.preview
+ 合计 0.05 MB，1 个一级项
+  [目录] images        53248 字节  3 个文件
+
+03:43:58.950 [cache] ===== Caches/BFC =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/BFC
+ 合计 0.00 MB，2 个一级项
+  [目录] AppReboot          678 字节  1 个文件
+  [文件] Model_Config          451 字节  1 个文件
+
+03:43:58.951 [cache] ===== Caches/com.apple.WebKit.Networking =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/com.apple.WebKit.Networking
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.954 [cache] ===== Caches/player-lottie-animations-story =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/player-lottie-animations-story
+ 合计 0.02 MB，2 个一级项
+  [文件] 5648c2926c1c93eb2d30748994ba7b96.json        10053 字节  1 个文件
+  [文件] 31df8ce99de871afaa66a7a78f44deec.json         7399 字节  1 个文件
+
+03:43:58.955 [cache] ===== Caches/CustomDiskCache =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/CustomDiskCache
+ 合计 0.00 MB，0 个一级项
+
+03:43:58.968 [cache] ===== Caches/apm_net_log =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Library/Caches/apm_net_log
+ 合计 0.34 MB，9 个一级项
+  [文件] tv.danmaku.bilianime1 2026-09-21--01-21-14-974.log       153870 字节  1 个文件
+  [文件] .mmap        51200 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-01-31-497.log        34264 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-40-37-216.log        32064 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-19-07-911.log        23860 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-07-52-906.log        23005 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--02-29-54-288.log        20664 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--03-23-30-515.log        16154 字节  1 个文件
+  [文件] tv.danmaku.bilianime1 2026-09-21--03-43-02-475.log            0 字节  1 个文件
+
+03:43:59.267 [cache] ===== Documents 下各一级项 =====
+ 路径: /var/mobile/Containers/Data/Application/99424806-D7F1-4F13-91B5-C8EAB8B3BB8C/Documents
+ 合计 39.69 MB，36 个一级项
+  [目录] .Trash     17464546 字节  32 个文件
+  [目录] BBPhoneThemes      6345456 字节  17 个文件
+  [目录] BLog      4523914 字节  1 个文件
+  [目录] BrandSplash      4455629 字节  24 个文件
+  [目录] db      3293184 字节  2 个文件
+  [目录] biliprobe      2856422 字节  5 个文件
+  [目录] WebApplet      1781534 字节  19 个文件
+  [目录] localThemes       255136 字节  3 个文件
+  [目录] com.bilibili.bcm       159744 字节  9 个文件
+  [目录] reportv2        71079 字节  3 个文件
+  [目录] live        66653 字节  13 个文件
+  [目录] database        57496 字节  4 个文件
+  [目录] .Downloads        57496 字节  4 个文件
+  [目录] com.bilibili.bbad        53248 字节  3 个文件
+  [目录] UploadSDKDB        49152 字节  3 个文件
+  …
+
+03:43:59.268 [cache] 缓存盘点完成
+03:44:01.568 [beat] 第 4 次心跳（约 60 秒）| 委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=2 | 下载器=0 段级下载=0 | 预加载=0 | URLProtocol=0/0

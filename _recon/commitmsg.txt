@@ -1,35 +1,39 @@
-fix(probe): 修「安装后一启动就闪退」—— performSelector 把整数返回值当对象
+feat(probe): 改找「缓存写法」而非「下载者」—— 挂零参/单参的缓存路径 provider
 
-崩溃日志（bili-universal-2026-09-21-033533.ips）直接指出了位置：
-  EXC_BAD_ACCESS (SIGSEGV) at 0x00000000ffffffff
-  frame 0: objc_retain
-  frame 1: +[BiliProbe bootstrap]
-  frame 2: BiliProbeInit            ← dylib 的 constructor
+前七次真机都在找"谁在下载视频字节"，结果全部网络层观测点为 0
+（AVAssetResourceLoader / NSURLSession / NSURLRequest / NSURLProtocol /
+NSURLConnection / AVURLAsset / BBRMediaDownloader / 预加载 全空）。
 
-根因：
-  exit 前我加了这段探测 P2P 本地服务端口的代码 ——
-      id r = [p2pMgr performSelector:NSSelectorFromString(@"getHttpServerPort")];
-      port = [r integerValue];
-  performSelector 声明返回 id，而 getHttpServerPort 实际返回**整数端口**。
-  把整数当对象指针交给 ARC 去 retain（objc_retain）→ 读 0xffffffff → 段错误。
-  0xffffffff 正是崩溃地址里的值。
+而**缓存盘点证明字节确实落到本地**（上一次真机，构建 a9e542f）：
+  /…/Library/Application Support   594,860,978 字节 / 13,171 个文件  ← 595MB
+  /…/Library/Caches                 34,938,465 字节 / 537 个文件
+  /…/tmp/dash_cache                  3,869,073 字节 / 10 个文件
+  /…/tmp/ijkvideo                            0 字节 / 0 个文件
+  /…/tmp/p2p_cache                           0 字节 / 0 个文件   ← P2P 未启用
+  /…/Library/Caches/p2p_cache                0 字节 / 0 个文件   ← 同上
 
-教训（已写进代码注释）：
-  **对签名未知的方法，绝不用 performSelector 取其返回值。**
-  本类只有方法名（来自运行时 dump），没有 type encoding，
-  因此只能判断 respondsToSelector，不能取值。
+因此换切入点：不问"谁下载"，而问"缓存文件写在哪、谁提供这个路径"。
 
-同时撤掉三个「签名靠推测」的 hook（IJKDashStreamItem.initWithStreamId:…、
-IJKMediaPlayerItem.parseDash:videoId:audioId:、IJKMediaPlayerWrapper.prepareWithItem:）：
-  class_replaceMethod 的 types 只是元数据、**不校验实现**，
-  若真实签名与推测不同（如某参数实为对象而非 int），C 函数会错误读参并对
-  垃圾指针 objc_retain → 同样是一启动就闪退。
-  这些类在 t=0 就被 hook，风险不可接受。
-  改为**只做类存在性探测**，不替换任何方法。
+为什么这批 hook 不会像上次那样崩（关键论证）：
+  上一次闪退的两个原因都源于**签名不确定**：
+    ① performSelector 取整数返回值当对象 → objc_retain 读 0xffffffff
+    ② 多参数方法（IJKDashStreamItem.initWithStreamId:…）按推测签名读寄存器，
+       参数若是对象则被垃圾指针 retain
+  而本次挂的三个方法**只涉及对象参数，参数个数固定（0 或 1）**：
+    IJKP2PServerResolver                + getAndCreateP2pConfigPath   @@:
+    BBPlayerInteractiveResourcePreload  + savedFolder                 @@:
+    BBPlayerInteractiveResourcePreload  - downloadWithUrl:savedPath:relativePath:  v@:@@@
+  结构上不存在"把整数当对象"的可能，因此即使理解有偏差也不会崩。
 
-落点不受影响：静态分析已确定 IJKDashStreamItem.baseUrl / backupUrl0/1 是
-CDN URL 所在字段；实现阶段会先取到真实 type encoding（真机打印一次
-method_getTypeEncoding，或修正二进制 method list 解析）再挂 hook。
+其中 downloadWithUrl:savedPath:relativePath: 是最有价值的落点：
+它同时给出 **CDN URL 与落盘路径**，是"下载 + 落盘"的合流点，
+也正是阶段 2「改 host / 多 CDN 池」需要插进去的地方。
 
-清理：删除随之失效的 3 个观测函数、6 个计数与其在 verdict/心跳中的引用，
-避免 -Wunused-function 与死代码。
+新增观测点输出（[path] 标签）：
+  ★★ downloadWithUrl ← host / url / savedPath / relativePath
+  ★  savedFolder → 缓存根目录
+     getAndCreateP2pConfigPath → p2p 配置路径
+
+[verdict] 新增最高优先级分支：
+  ★★★ 找到了！downloadWithUrl 命中 N 次 → 阶段 2/3 落点就是它
+心跳行同步输出「落盘=N」。

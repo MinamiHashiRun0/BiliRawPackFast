@@ -228,6 +228,11 @@ static id          ProbeConnInitWithRequest(id self, SEL _cmd, NSURLRequest *req
 static id          ProbeAssetClassWithURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options);
 static void        ProbeScanTree(NSString *root, NSString *label, int topN);
 
+// 缓存路径 provider（②h）—— 只涉及对象参数，签名无歧义
+static id          ProbeP2pConfigPath(id self, SEL _cmd);
+static id          ProbeSavedFolder(id self, SEL _cmd);
+static void        ProbeDownloadWithUrl(id self, SEL _cmd, id url, id savedPath, id relativePath);
+
 @implementation BiliProbe
 
 //=== 0. 转发与路由 ============================================================
@@ -858,6 +863,52 @@ static id ProbeAssetClassWithURL(id self, SEL _cmd, NSURL *URL, NSDictionary *op
     return nil;
 }
 
+//=== 3d. 缓存路径 provider ====================================================
+// 见 bootstrap ②h：动机是"找缓存写法"而非"找下载者"，
+// 且这些方法**只涉及对象参数**，不存在把整数当对象的崩溃风险。
+
+static _Atomic(int32_t) gCntDlWithUrl   = 0;
+static _Atomic(int32_t) gCntSavedFolder = 0;
+
+static IMP gOrigP2pConfigPath   = NULL;
+static IMP gOrigSavedFolder     = NULL;
+static IMP gOrigDownloadWithUrl = NULL;
+
+static id ProbeP2pConfigPath(id self, SEL _cmd) {
+    id r = nil;
+    if (gOrigP2pConfigPath) {
+        r = ((id (*)(id, SEL))gOrigP2pConfigPath)(self, _cmd);
+    }
+    PLog(@"path", @"IJKP2PServerResolver getAndCreateP2pConfigPath → %@", r ?: @"(nil)");
+    return r;
+}
+
+static id ProbeSavedFolder(id self, SEL _cmd) {
+    id r = nil;
+    if (gOrigSavedFolder) {
+        r = ((id (*)(id, SEL))gOrigSavedFolder)(self, _cmd);
+    }
+    ProbeBump(&gCntSavedFolder);
+    PLog(@"path", @"★ BBPlayerInteractiveResourcePreload savedFolder → %@", r ?: @"(nil)");
+    return r;
+}
+
+static void ProbeDownloadWithUrl(id self, SEL _cmd, id url, id savedPath, id relativePath) {
+    ProbeBump(&gCntDlWithUrl);
+    NSString *u = [url isKindOfClass:NSString.class] ? url :
+                  ([url isKindOfClass:NSURL.class] ? [(NSURL *)url absoluteString] : [url description]);
+    NSURL *nu = u.length ? [NSURL URLWithString:u] : nil;
+    PLog(@"path", @"★★ downloadWithUrl ← 下载 + 落盘合流点\n"
+                  @"     host = %@\n"
+                  @"     url  = %.200@\n"
+                  @"     savedPath    = %@\n"
+                  @"     relativePath = %@",
+         nu.host ?: @"?", u ?: @"(nil)", savedPath ?: @"(nil)", relativePath ?: @"(nil)");
+    if (gOrigDownloadWithUrl) {
+        ((void (*)(id, SEL, id, id, id))gOrigDownloadWithUrl)(self, _cmd, url, savedPath, relativePath);
+    }
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -1058,17 +1109,22 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t preloads    = ProbeRead(&gCntPreloadCall);
     int32_t protos      = ProbeRead(&gCntProtocolCanInit);
     int32_t protoStarts = ProbeRead(&gCntProtocolStart);
+    int32_t dlWithUrl   = ProbeRead(&gCntDlWithUrl);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
                      @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d "
-                     @"| 预加载=%d | URLProtocol=%d/%d",
+                     @"| 预加载=%d | URLProtocol=%d/%d | ★落盘=%d",
          hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
-         preloads, protos, protoStarts);
+         preloads, protos, protoStarts, dlWithUrl);
 
-    if (protoStarts > 0 || protos > 0) {
+    if (dlWithUrl > 0) {
+        PLog(@"verdict", @"★★★ 找到了！downloadWithUrl 命中 %d 次 —— "
+                         @"这是「CDN URL + 落盘路径」的合流点，阶段 2/3 落点就是它"
+                         @"（真实 host 见 [path] 行）", dlWithUrl);
+    } else if (protoStarts > 0 || protos > 0) {
         PLog(@"verdict", @"★★ 找到了！NSURLProtocol 认领=%d 启动=%d", protos, protoStarts);
     } else if (dlTask > 0) {
         PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 落点 BBRMediaDownloader", dlTask);
@@ -1399,6 +1455,50 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             }
         }
 
+        // ②h 缓存路径 provider（换思路定位落点，且结构上不可能崩）
+        //
+        // 为什么换思路：前七次真机都在找"谁在下载视频字节"，全部网络层观测点为零。
+        // 而缓存盘点证明字节**确实落到本地**：
+        //   Library/Application Support  595 MB / 13,171 文件
+        //   tmp/dash_cache               3.8 MB / 10 文件
+        //   tmp/ijkvideo、tmp/p2p_cache  均为 0（P2P 未启用）
+        // 所以更可靠的切入点是"缓存文件写在哪、谁提供这个路径"。
+        //
+        // 安全性论证（这是选它的关键理由）：
+        //   这批方法只接收/返回**对象**（路径字符串），参数个数固定，
+        //   **不存在"把整数当对象"的风险** —— 那正是上一个包一启动就闪退的原因。
+        //   因此即使我对签名的理解有偏差，也不会像多参数 C 函数那样读错寄存器
+        //   并对垃圾指针 objc_retain。
+        //
+        // 其中 downloadWithUrl:savedPath:relativePath: 最关键：
+        //   它同时给出 **CDN URL 与落盘路径**，是"下载 + 落盘"的合流点。
+        {
+            Class p2pSrv = NSClassFromString(@"IJKP2PServerResolver");
+            if (p2pSrv) {
+                gOrigP2pConfigPath = ProbeReplaceMethod(
+                    p2pSrv, @selector(getAndCreateP2pConfigPath),
+                    (IMP)ProbeP2pConfigPath, "@@:");
+                PLog(@"hook", @"✓ 已挂 IJKP2PServerResolver :: getAndCreateP2pConfigPath");
+            } else {
+                PLog(@"hook", @"· IJKP2PServerResolver 不在运行时");
+            }
+
+            Class pre = NSClassFromString(@"BBPlayerInteractiveResourcePreload");
+            if (pre) {
+                // savedFolder 是类方法
+                gOrigSavedFolder = ProbeReplaceMethod(
+                    object_getClass(pre), @selector(savedFolder),
+                    (IMP)ProbeSavedFolder, "@@:");
+                gOrigDownloadWithUrl = ProbeReplaceMethod(
+                    pre, @selector(downloadWithUrl:savedPath:relativePath:),
+                    (IMP)ProbeDownloadWithUrl, "v@:@@@");
+                PLog(@"hook", @"✓ 已挂 BBPlayerInteractiveResourcePreload :: savedFolder / "
+                              @"downloadWithUrl:savedPath:relativePath:");
+            } else {
+                PLog(@"hook", @"· BBPlayerInteractiveResourcePreload 不在运行时");
+            }
+        }
+
         // ②g IJK 播放链路
         //
         // ⚠️ 重要决策（记录原因，避免以后又"顺手加回来"）：
@@ -1483,14 +1583,15 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 beats++;
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 委托类=%d setDelegate=%d "
                               @"shouldWait=%d | NSURLSession=%d NSURLRequest=%d | "
-                              @"下载器=%d 段级下载=%d | 预加载=%d | URLProtocol=%d/%d",
+                              @"下载器=%d 段级下载=%d | 预加载=%d | URLProtocol=%d/%d | ★落盘=%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
                      ProbeRead(&gCntShouldWait),
                      ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed),
                      ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask),
                      ProbeRead(&gCntPreloadCall),
-                     ProbeRead(&gCntProtocolCanInit), ProbeRead(&gCntProtocolStart));
+                     ProbeRead(&gCntProtocolCanInit), ProbeRead(&gCntProtocolStart),
+                     ProbeRead(&gCntDlWithUrl));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
