@@ -191,6 +191,56 @@ dylib 就位且内容一致、原有 2825 个条目全部保留、`LC_LOAD_DYLIB
 
 ---
 
+## 真机实测结论（2026-09-21，iOS 27.0）
+
+**注入可行性：已验证 ✅** —— 这是整个方案最大的未知，现在解决了。
+
+```
+[boot] ================ BiliProbe 已加载 ================
+[boot] 主程序=/private/var/containers/Bundle/Application/08A1B80B-…/bili-universal.app/bili-universal
+[hook] ✓ 已替换 AVAssetResourceLoader :: setDelegate:queue:
+[hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:completionHandler:
+[hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:
+[env]  系统 iOS 27.0 / 加载镜像 1283 个
+```
+
+- **越狱/反调试检测未触发**：9 个痕迹路径（Cydia / MobileSubstrate / sshd / apt / bash / User Applications …）全部「不存在」
+- **运行时侦察成功**：枚举 148,961 个类，写出 4,000 个类的定向 dump
+- **确认 15 个 `AVAssetResourceLoaderDelegate` 实现者**，含
+  `BBRResourceLoaderManager`、`BBLiveBaseResourceLoaderManager`、`BBUperVIResourceLoaderManager`
+
+### 抓到的 CDN 选择点真实签名（此前只有方法名，签名是空白）
+
+| 类 | 选择子 | 签名 |
+|---|---|---|
+| `BBLiveBCQualityComponent` | `_requestCDNNode` | `v16@0:8`（void，无参） |
+| `BBLiveBCQualityComponent` | `_requestCDNNodeV2` | `v16@0:8` |
+| `BGMFragmentContext` | `_startCDNDownloadWithPlayItem:` | `v24@0:8@16` |
+| `BGMFragmentContext` | `_sendCDNRequestWithFragment:` | `v24@0:8@16` |
+| `BGMFragmentDownloader` | `_downloadCDNDataWithFragment:` | `v24@0:8@16` |
+| `BGMMasterListProcessor` | `_setCdnFirst:` | `v24@0:8@16` |
+| `BFCBandwidthManager` | `bfcURLProtocolInjectorTransferRequest:` | `@24@0:8@16` |
+| `BFCBandwidthManager` | `bfcURLProtocolInjectorTransferRequest:response:` | `@32@0:8@16@24` |
+
+### 待解决（下一轮真机）
+
+首轮日志**没有任何视频数据请求**：`shouldWait = 0`，`[session]` 命中的全是
+`i0.hdslb.com` 的静态资源（png/svg/zip/json），没有 m4s。
+且**心跳与 `[verdict]` 一行都没有** —— 探针缺陷：`dispatch_source` 定时器在真机上
+一次都没触发（其它日志正常，说明不是写盘问题）。
+
+两处已修：心跳改 `NSTimer` + 结论改为不依赖定时器的三处强制写；
+并新增**第三观测点 `NSURLRequest` 构造**，使下次无论视频走哪条路都能定性：
+
+| 命中情况 | 含义 | 阶段 2 落点 |
+|---|---|---|
+| `AVAssetResourceLoader` 有 | 走资源加载委托 | 接委托 |
+| `NSURLSession` 有 | 走系统网络栈 | 在 session 层重定向 |
+| `NSURLRequest` 有 | 只在请求构造层可见 | 在构造层重定向 |
+| 三者全零（且确实播了视频） | 走自研 socket 栈 | 需换思路 |
+
+---
+
 ## 侦察结论（已实测，非推测）
 
 目标：`哔哩哔哩-弹幕番剧直播高清视频_9.12.0.ipa`，264.8 MiB
