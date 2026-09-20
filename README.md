@@ -26,13 +26,31 @@
 
 ### ⑧ 的验证状态（分层，务必分清）
 
-SIDX 解析被刻意拆成「纯 C 核心 + ObjC 薄外壳」，于是验证也分两层：
-
 | 层 | 如何验证 | 状态 |
 |---|---|---|
-| **纯 C 核心**（`BSSidxCore.c`） | Linux runner + clang + 9 个夹具，**真跑** | ✅ **已实测**（CI job `verify-sidx-core`，约 10 秒） |
-| ObjC 外壳（`BSSidxIndex.m`） | 只做 NSData→核心→结构的搬运 | ✅ 编译通过，未运行 |
-| 并发引擎（`BSSegmentFetcher.m`） | 算法已有 Python 同构实现 4/4 通过 | ✅ 编译通过；ObjC 版本体未运行 |
+| **纯 C 核心**（SIDX 解析） | Linux runner + clang + 9 个夹具，**真跑** | ✅ **已实测** |
+| **并发引擎**（`BSSegmentFetcher`） | macOS runner + 按连接限速的 Range 服务器，**真跑** | ✅ **已实测**（见下） |
+| ObjC 外壳（`BSSidxIndex`） | 只做 NSData→核心→结构搬运 | ✅ 编译通过，未单独运行 |
+| **真机运行** | — | ❌ **零次** |
+
+并发引擎实测（CI job `verify-segment-fetcher`，macOS）：
+
+```
+[1] 20 段并发4：  ✓ 交付严格按段号递增  ✓ 段数完整  ✓ 逐段内容逐字节正确
+[2] 并发提速：    并发1 = 13.14s   并发8 = 1.79s   → 实测 7.3×   ✓
+[3] 坏 host 降级：✓ 重试后切到备用 host 并完整交付
+[4] 全失效：      ✓ 回调用 onFailure   ✓ 未交付任何残缺数据
+全部通过 ✅
+```
+
+服务端按**连接**限速 256 KiB/s —— 这正是真实场景：B站对单连接限速，
+所以"并发能否提速"必须用这种方式验证，而不是在本机回环上看（回环太快，测了没意义）。
+
+> 夹具经历一次设计返工，值得记录：最初夹具按「段号填充常量字节」生成，
+> 而测试用不同分段粒度断言，导致所有「逐段内容」检查失败。
+> **问题在夹具设计，不在被测引擎**（引擎的按序/段数/重试/降级当时就是通过的）。
+> 已改为「按字节位置」编码（第 i 字节 = `i % 251`），与分段方式无关，
+> 并新增 `_recon/verify_fixture_recipe.py` 验证该配方在 4KiB/128KiB/1000B 等多种粒度下自洽。
 
 夹具实测结果（CI 日志原文）：
 
@@ -261,18 +279,22 @@ Actions → `Build BiliProbe` → Run workflow。
   日志走异步队列、不阻塞调用方；且 `shouldWaitForLoading` 由 AVFoundation
   控制调用频率（非每帧），因此不应引入可观测卡顿 —— 但这一点**尚未真机验证**。
 - **注入可行性本身完全未验证。** 迄今所有结论都在二进制层（Mach-O 结构、依赖、
-  签名、字符串）、算法层（Python 参考实现）与纯 C 核心层（夹具实测），
+  签名、字符串）、算法层（纯 C 夹具 + ObjC 真跑 + Python 参考实现），
   **没有一次真机运行**。App 会不会被自身完整性检查干掉、dylib 能否被加载，
   只有装上才知道。
 - 注入版 IPA 那条路（workflow 的 `--ipa` 分支）**仍未在 CI 里执行过** ——
   今天没有可用的 IPA 直链，该步骤一直跳过。
   不过其核心改写逻辑已用**真实 IPA** 做了端到端演练
   （`_recon/test_inject_real_ipa.py`）：2825 个 zip 条目一致、主二进制长度不变、
-  ncmds +1、sizeofcmds +72、逐字节差异 52 处且**允许区外 0 处**。
-  缺的只是 macOS 上 `codesign` 那一步。
-- 脱壳包不含 `embedded.mobileprovision`，无法还原原始 entitlements；
-  自签用最小集合，全能签签名时会替换成你证书对应值。
-  workflow 会先尝试用 `codesign -d --entitlements :-` 从原签名里抽原始值。
+  ncmds +1、sizeofcmds +72、`dataoff` 保持不变、`datasize` 置 0、
+  逐字节差异 54 处且**允许区外 0 处**。缺的只是 macOS 上 `codesign` 那一步。
+- **自签会丢掉一批 entitlements**（实测本包完整保留原始值）：
+  `application-identifier` 带的是 B站 Team ID `746845GC96`，与你的证书不符。
+  预注入包已剥离主二进制原有签名以避免被沿用（沿用会导致**一启动就闪退**，
+  极易误判成注入失败）。另外 `extended-virtual-addressing` /
+  `increased-memory-limit`（JIT 相关）、`aps-environment`、
+  `associated-domains` 等自签本来也拿不到，见交付目录里的说明文件。
 - SIDX 只处理文件里的**第一个** sidx；多 sidx / 层级索引不支持。
-- 并发引擎的 ObjC 版本**从未运行过**（只有编译 + Python 同构实现的行为验证）。
+- SIDX 夹具是**按规范自行构造**的（IPA 内无真实 m4s），
+  能证明实现与规范一致，**不能**替代真实字节验证。
 - CDN 重定向完全未开始。
