@@ -38,6 +38,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
+#include <stdatomic.h>
 
 //------------------------------------------------------------------------------
 #pragma mark - 日志
@@ -149,6 +150,26 @@ static IMP ProbeReplaceMethod(Class cls, SEL sel, IMP newImp, const char *types)
 + (void)probe_noteRecycleMiss:(NSString *)clsName sel:(NSString *)selName;
 @end
 
+/// 观测计数（供心跳使用）。
+/// 为什么需要：如果 hook 挂了但一直没被调用，日志里会几乎没有内容，
+/// 用户拿回来也看不出是"注入失败"还是"App 没走这条路径"。
+/// 有了计数 + 心跳，这两种情况可以区分开。
+/// 用 C11 原子操作而非 OSAtomicIncrement32（后者 iOS 10 起已弃用，
+/// 在开告警即错误的构建里会直接挂掉）。
+static _Atomic(int32_t) gCntSetDelegate        = 0;
+static _Atomic(int32_t) gCntShouldWait         = 0;
+static _Atomic(int32_t) gCntRenewal            = 0;
+static _Atomic(int32_t) gCntAuthChallenge      = 0;
+static _Atomic(int32_t) gCntDidCancel          = 0;
+static _Atomic(int32_t) gCntDelegateClassHooked = 0;
+
+static inline void ProbeBump(_Atomic(int32_t) *p) {
+    atomic_fetch_add_explicit(p, 1, memory_order_relaxed);
+}
+static inline int32_t ProbeRead(_Atomic(int32_t) *p) {
+    return atomic_load_explicit(p, memory_order_relaxed);
+}
+
 /// 原 IMP 查表（按「类名 + 选择子名」）。
 /// 不能用共享选择子做键：多个 delegate 类会撞车，各自的原实现会互相覆盖。
 static void        ProbeRegSet(NSString *cls, NSString *sel, IMP imp);
@@ -242,6 +263,7 @@ static intptr_t ProbeRecycledCall(id self, SEL _cmd, id a1, id a2) {
 static IMP gOrigSetRLDelegate = NULL;
 
 static void ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue) {
+    ProbeBump(&gCntSetDelegate);
     PLog(@"resloader", @"setDelegate:queue: → delegate=%@ queue=%s",
          delegate ? NSStringFromClass([delegate class]) : @"(nil)",
          queue ? "有" : "NULL");
@@ -264,6 +286,7 @@ static void ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispa
 static BOOL ProbeShouldWaitForLoading(id self, SEL _cmd,
                                       AVAssetResourceLoader *loader,
                                       AVAssetResourceLoadingRequest *request) {
+    ProbeBump(&gCntShouldWait);
     @autoreleasepool {
         NSURLRequest *r = request.request;
         NSURL *u = r.URL;
@@ -298,6 +321,7 @@ static BOOL ProbeShouldWaitForLoading(id self, SEL _cmd,
 static BOOL ProbeShouldWaitForRenewal(id self, SEL _cmd,
                                       AVAssetResourceLoader *loader,
                                       AVAssetResourceRenewalRequest *request) {
+    ProbeBump(&gCntRenewal);
     PLog(@"resloader", @"shouldWaitForRenewal URL=%.300@", request.request.URL.absoluteString ?: @"(nil)");
     return ProbeForwardToOriginal(self, _cmd, loader, request);
 }
@@ -305,6 +329,7 @@ static BOOL ProbeShouldWaitForRenewal(id self, SEL _cmd,
 static BOOL ProbeAuthChallenge(id self, SEL _cmd,
                                AVAssetResourceLoader *loader,
                                NSURLAuthenticationChallenge *challenge) {
+    ProbeBump(&gCntAuthChallenge);
     PLog(@"pinning", @"⚠️ 资源加载器收到认证挑战 method=%@ host=%@ realm=%@  ← 有值=存在 TLS 校验链路",
          challenge.protectionSpace.authenticationMethod ?: @"(nil)",
          challenge.protectionSpace.host ?: @"(nil)",
@@ -315,6 +340,7 @@ static BOOL ProbeAuthChallenge(id self, SEL _cmd,
 static void ProbeDidCancelLoading(id self, SEL _cmd,
                                   AVAssetResourceLoader *loader,
                                   AVAssetResourceLoadingRequest *request) {
+    ProbeBump(&gCntDidCancel);
     PLog(@"resloader", @"didCancelLoading URL=%.200@", request.request.URL.absoluteString ?: @"(nil)");
     (void)ProbeForwardToOriginal(self, _cmd, loader, request);
 }
@@ -641,6 +667,7 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
     NSString *key = NSStringFromClass(cls);
     if ([gHookedClasses containsObject:key]) return;
     [gHookedClasses addObject:key];
+    ProbeBump(&gCntDelegateClassHooked);
 
     PLog(@"resloader", @"为 delegate %@ 安装只读观测点", key);
 
@@ -698,6 +725,57 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
         });
 
         PLog(@"boot", @"探针安装完毕，等待播放器触发…");
+
+        // ---- 心跳 + 结论 ----
+        // 目的：把「注入失败」「hook 没被调用」「一切正常」三种情况区分开。
+        // 没有这个，用户拿回来的日志若几乎是空的，就无法判断是哪一种，
+        // 整轮真机测试的信息量会归零 —— 而真机测试是最贵的一环。
+        __block int beats = 0;
+        dispatch_source_t timer =
+            dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        dispatch_source_set_timer(timer,
+                                  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
+                                  (uint64_t)(15 * NSEC_PER_SEC),
+                                  (uint64_t)(2 * NSEC_PER_SEC));
+        dispatch_source_set_event_handler(timer, ^{
+            @autoreleasepool {
+                beats++;
+                int32_t hookClasses = ProbeRead(&gCntDelegateClassHooked);
+                int32_t setDel      = ProbeRead(&gCntSetDelegate);
+                int32_t waits       = ProbeRead(&gCntShouldWait);
+                int32_t renewals    = ProbeRead(&gCntRenewal);
+                int32_t auths       = ProbeRead(&gCntAuthChallenge);
+                int32_t cancels     = ProbeRead(&gCntDidCancel);
+
+                PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 已挂委托类=%d "
+                              @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d",
+                     beats, beats * 15, hookClasses, setDel, waits, renewals, auths, cancels);
+
+                // 45 秒做一次结论：这段足够用户播一个视频
+                if (beats == 3) {
+                    if (hookClasses > 0 && waits > 0) {
+                        PLog(@"verdict", @"✅ 结论：注入成功且已捕获资源加载链路 —— "
+                                         @"日志里应有具体 URL/scheme，可以据此定 hook 点");
+                    } else if (hookClasses > 0) {
+                        PLog(@"verdict", @"⚠️ 结论：注入成功、委托 hook 已挂，但 "
+                                         @"shouldWait 一次都没触发。说明 App 取视频数据"
+                                         @"没走 AVAssetResourceLoaderDelegate —— "
+                                         @"阶段 2 需要改用其它注入点（见 README 的备选）");
+                    } else if (setDel > 0) {
+                        PLog(@"verdict", @"⚠️ 结论：setDelegate:queue: 被调用了，但委托类"
+                                         @"钩子没挂上 —— 探针自身缺陷，请回报此文件");
+                    } else {
+                        PLog(@"verdict", @"❌ 结论：注入的 dylib 已加载（能写这份日志即为证据），"
+                                         @"但 AVAssetResourceLoader 完全没有被使用。"
+                                         @"若你确实播放了视频，则说明该 App 的视频数据"
+                                         @"不经 AVAssetResourceLoaderDelegate，"
+                                         @"阶段 2 必须换注入点");
+                    }
+                }
+            }
+        });
+        dispatch_resume(timer);
     }
 }
 

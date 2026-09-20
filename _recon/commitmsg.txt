@@ -1,29 +1,36 @@
-refactor(sidx): 解析核心抽成纯 C —— 让「解析语义」在 Linux CI 上真跑，而非只验证编译
+feat(probe): 心跳与结论日志 + 预注入版 IPA（把真机测试的往返成本压到一次）
 
-动机（这是本轮最主要的改动）：
-  SIDX 解析此前只在 macOS runner 上验证「能编译」，从没用真实字节跑过。
-  但 SIDX 解析是纯字节逻辑、与 Foundation 无关 —— 完全可以抽成纯 C，
-  在 Linux runner 上用一行 clang 编译并跑夹具，约 10 秒出结果（macOS 约 1 分钟且排队）。
+本轮两件事，都是为了让「最贵的那一步」（真机测试）尽量一次成功。
 
-分层（关键是别让被测代码与出货代码分叉）：
-  inject/probe/BSSidxCore.{h,c}   纯 C 解析核心，无任何 ObjC/Foundation 依赖
-  inject/probe/BSSidxIndex.{h,m}  ObjC 外壳：NSData → 核心 → ObjC 结构，只做类型搬运
-  inject/probe/test_sidx_core.c   夹具测试程序（纯 C）
-  即：**出货走的就是被测试的那份核心**。
-  BSSidxIndex.m 已重写为薄外壳，解析逻辑一行不留（有闸门钉住，见下）。
+1) 探针加心跳 / 结论（BiliProbe.m）
+   问题：如果 hook 挂了但一直没被调用，日志几乎是空的，
+   拿回来无法区分「注入失败」「App 不走这条路径」「探针自己坏了」三种情况，
+   整轮真机测试的信息量会归零。
+   做法：
+     * 六个 C11 原子计数（setDelegate / shouldWait / renewal /
+       authChallenge / cancel / 已挂委托类数）
+       用 stdatomic 而非 OSAtomicIncrement32 —— 后者 iOS 10 起已弃用，
+       在开告警即错误的构建里会直接挂掉
+     * dispatch_source 定时器每 15 秒写一行心跳
+     * 第 45 秒写一行 [verdict] 结论，四种分支各自给出可执行结论：
+         ✅ 注入成功且已捕获资源加载链路 → 可据此定 hook 点
+         ⚠️ 委托 hook 挂了但 shouldWait 从未触发 → App 不走此路径，需换注入点
+         ⚠️ setDelegate 被调用但钩子没挂上 → 探针自身缺陷，请回报
+         ❌ dylib 已加载（能写日志即证据）但 AVAssetResourceLoader 完全未被使用
+   这样用户只发 trace.log 就能判断下一步，不必来回一轮。
 
-新增 CI job verify-sidx-core（ubuntu-latest）：
-  clang -std=c11 -Wall -Wextra -Werror -O1  编译后用 _recon/sidx_fixtures/ 跑 9 个夹具
-  每个成功用例额外自检：段字节和 == covered_bytes、段连续无空洞、
-  二分查找抽查命中正确段号
+2) 预注入版 IPA（_recon/build_injected_ipa.py）
+   问题：此前要测试必须先在全能签里导入插件、启用注入、再签名，步骤多。
+   现在额外提供 bili-9.12.0-probe-injected.ipa：下载 → 签名 → 安装。
+   自校验（对真实 IPA 实测）：
+     dylib 已就位且内容一致 ✓ (114,688 字节)
+     原有 2825 个条目全部保留 ✓（共 2826 个）
+     LC_LOAD_DYLIB 就位 ✓ 共 98 条
+     主二进制长度未变 ✓ (630,083,392 字节)
+   注意：本包只做「注入 + 放 dylib」，**不做签名** ——
+   签名必须 macOS 的 codesign，Windows 做不到；
+   全能签本来就是签名工具，拿到直接签即可。
+   两种装法必须二选一，叠加会导致 dylib 加载两次（hook 幂等不会崩，但日志翻倍）。
 
-新增本地闸门（preflight.py 第 5 项）：解析逻辑唯一性
-  扫描 inject/probe 下所有 .m/.h，若出现 rd32/BOX_SIDX/reference_count/0x73696478
-  等解析特征即报错 —— 防止有人（包括我）把解析逻辑抄回 ObjC 外壳，
-  那会让夹具测试变成摆设。这是真实存在过的分叉风险，故用闸门钉死。
-
-新增 .gitattributes：
-  *.bin 标记为 binary，禁止行尾/文本转换 —— 否则 Windows 检出时夹具字节被改写，
-  与 cases.json 里的期望值对不上。源码统一 LF（CI 在 Linux/macOS 跑）。
-
-未验证项：Linux job 尚未实际运行过（本次推送首次触发）；ObjC 侧仍只有编译验证。
+未验证项：心跳逻辑与预注入包都**未在真机上跑过**；本轮只有静态检查与
+二进制自校验通过。预注入包本身尚未被 macOS 签名过。
