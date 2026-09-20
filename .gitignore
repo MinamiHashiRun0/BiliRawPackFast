@@ -33,3 +33,6 @@ __pycache__/
 # CI 产物本地副本
 _artifact/
 deliver/
+
+# 第三方 IPA 的分析产物（字符串转储等），含第三方内容，不入库
+_thirdparty/

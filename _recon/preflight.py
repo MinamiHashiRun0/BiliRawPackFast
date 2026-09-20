@@ -59,7 +59,7 @@ def check_line_endings():
     exts = (".py", ".m", ".h", ".c", ".yml", ".yaml", ".sh", ".txt", ".md", "Makefile")
     # deliver/ 是给用户看的产物，不进 CI，也不由 bash 执行；
     # 真正的 CI 输入是上面那些源码与脚本。_recon 同理（本地工具）。
-    skip_dirs = {".git", "_session_extract", "dist", ".theos", "_artifact", "deliver", "_recon"}
+    skip_dirs = {".git", "_session_extract", "dist", ".theos", "_artifact", "deliver", "_recon", "_thirdparty"}
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:

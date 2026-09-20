@@ -1,39 +1,20 @@
-feat(recon): 多 CDN 并发调度算法定案 —— 采用 stormdl 的 score-based 选择
+chore: 停止跟踪 _thirdparty/ 字符串转储（第三方内容）
 
-结论先行：**多 CDN 并发确实能突破单 CDN 天花板，实测 1.80×**
-  单 CDN 天花板（12 连接全打最强节点）  3.09 MiB/s
-  A. pick-best（≈重定向：选一个最快的）  2.38 MiB/s
-  B. equal-split（平均分给所有 CDN）     2.07 MiB/s
-  C. stormdl score-based                4.28 MiB/s  ← 相对A 1.80×，达单CDN天花板 142.6%
-  连接分配 C：mirrorcos=15（最强）08c=3 aliov=3 hw=3 —— 方向正确
+上次提交把从第三方 dylib 提取的字符串转储一并入库了：
+  _thirdparty/BiliBiliTweak.dylib.strings.txt   7254 行
+  _thirdparty/BiliNoAds.dylib.strings.txt        927 行
+  _thirdparty/B站空降助手…dylib.strings.txt      1647 行
+  _thirdparty/recon_*.json
 
-我连错四版，全部记录在此（这是"我以为是难点、其实早有定论"的典型）：
-  第 1 版：把「单连接速率」当成 host 上限 → 并发越多越慢，假结论
-  第 2 版：引入「单连接+总上限」但限速器形同虚设
-           （实测 7.29 MiB/s，而该 CDN 总上限只有 2.0 —— 超 3.6 倍）
-  第 3 版：改令牌桶，限速终于准了（实测 3.10 vs 理论 3.0），
-           但调度指标错：rate = 累计字节/累计耗时，被并发排队污染，
-           最快的 CDN 只拿到 1 条连接
-  第 4 版：改「单请求吞吐 EMA」仍反向分配（最快节点 1 条、最慢节点 10 条）
-           → 说明问题不在平滑方式，而在**评分函数结构**
+这些是从**第三方二进制**里抽出的字符串，与本仓库自己的代码无关，
+体量大（近万行）、含第三方内容，且本地随时可由
+_recon/dissect_tweaks.py / recon_thirdparty.py 重新生成。
 
-定案做法来自 stormdl（Rust，adaptive multi-segment parallel downloads）：
-  https://github.com/augani/stormdl  crates/storm-segment/src/multi_source.rs
+处理：
+  * git rm --cached 移除跟踪（本地文件保留，不影响后续分析）
+  * .gitignore 加入 _thirdparty/
+  * preflight 行尾检查排除 _thirdparty/（与 deliver/ _recon/ 同理：
+    这些是本地分析产物，不参与 CI）
 
-    score = (speed + 1.0) * error_penalty * load_factor
-    error_penalty = 1 / (1 + errors * 0.5)
-    load_factor   = 1 / (1 + active * 0.1)
-    速度 = **每次请求的速度采样**在长度 10 的滚动窗口内的均值
-
-  三个要点，恰好对应我前四版缺的东西：
-    1. 速度样本按**请求**采集并滚动平均，而不是累计值相除
-       —— 天然不受并发排队污染
-    2. (speed + 1.0) 保证冷启动分数为正，不会饿死慢节点
-    3. load_factor 是**温和**惩罚（active=10 时仍保留 1/2 分数），
-       因此允许把多条连接合理压在同一个强节点上
-
-新增 _recon/multi_cdn_stormdl.py：可直接复跑的策略对比验证台，
-含令牌桶确定性限速的多 CDN 模拟服务器（每个 CDN 独立总上限）。
-
-下一步：把这个评分函数移植进 ObjC 的 BSSegmentFetcher
-（现为「单 host + 失败切换」，需改为「多 host + score-based 分配」）。
+注：preflight 的行尾闸门这次正常工作 —— 它在提交前就报出了这 3 个文件，
+是我在提交时没有先看闸门输出。已改正。
