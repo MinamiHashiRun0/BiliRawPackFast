@@ -89,48 +89,26 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix="biliinject_")
     try:
-        # 1) 先把 dylib 放进 app bundle，产出中间 IPA
-        mid = os.path.join(tmp, "mid.ipa")
-        with zipfile.ZipFile(IPA) as zin, \
-             zipfile.ZipFile(mid, "w", zipfile.ZIP_DEFLATED, compresslevel=6,
-                             allowZip64=True) as zout:
+        # 1) 只做前置检查
+        #    （早期版本在这里先写一个带 dylib 的 mid.ipa，第 4 步再整包重写一遍 ——
+        #      等于凭空多一轮 265MB 读写加一份内存拷贝，在内存偏低的机器上会 OOM。
+        #      现在合并为第 4 步一次写出。）
+        with zipfile.ZipFile(IPA) as zin:
             names = zin.namelist()
             if EXE not in names:
                 print(f"IPA 里找不到 {EXE}")
                 return 1
-            if DYLIB_IN_APP in names:
-                print("⚠️ IPA 里已经有 BiliProbe.dylib，将覆盖")
-            added = 0
-            for n in names:
-                info = zin.getinfo(n)
-                zout.writestr(info, zin.read(n))
-            # 追加 dylib（IPA 里原本没有这个条目）
-            zi = zipfile.ZipInfo(DYLIB_IN_APP, date_time=(2026, 1, 1, 0, 0, 0))
-            zi.compress_type = zipfile.ZIP_DEFLATED
-            zi.external_attr = 0o755 << 16          # 可执行权限
-            with open(DYLIB, "rb") as f:
-                dylib_bytes = f.read()
-            zout.writestr(zi, dylib_bytes)
-        print(f"① 已把 dylib 放入 {DYLIB_IN_APP}")
+        print(f"① 源 IPA 含 {len(names)} 个条目，主二进制与 dylib 均存在")
 
-        # 2) 给主二进制追加 LC_LOAD_DYLIB
+        # 2) 读取主二进制并追加 LC_LOAD_DYLIB
+        # 内存注意：主二进制 630MB，需避免同时持有 bytes + bytearray 多份副本。
+        # 早期版本同时存在 raw(bytes) + MachO 内部副本 + stripped(bytearray) 三份，
+        # 在可用内存偏低的机器上直接 MemoryError。现在只保留一份 bytearray。
         final = os.path.join(tmp, "final.ipa")
-        with zipfile.ZipFile(mid) as z:
-            raw = z.read(EXE)
-        macho = inj.MachO(raw)
-        name = "@executable_path/Frameworks/BiliProbe.dylib"
-        if name in macho.dylibs:
-            print("② 主二进制已含该 LC_LOAD_DYLIB，跳过")
-            added_lc = 0
-        else:
-            added_lc = macho.insert_load_dylib(name)
-            print(f"② 已追加 LC_LOAD_DYLIB（{added_lc} 字节），"
-                  f"ncmds {macho.ncmds} sizeofcmds {macho.sizeofcmds:,}")
-        new_raw = macho.bytes()
+        with zipfile.ZipFile(IPA) as z:
+            raw = bytearray(z.read(EXE))       # 只此一份
 
-        # 记下 LC_CODE_SIGNATURE 命令位置与剥离前的状态，供第 3.5 步与自校验用
-        # 注意：注入器现在**故意**把 datasize 置 0（让原签名失效），
-        # 所以想看原始签名内容必须从**未注入的源数据**里读 —— 从 new_raw 读不到。
+        # 在改动之前先记录 LC_CODE_SIGNATURE 的位置与原始大小
         cs_src = find_code_signature_cmd(raw)
         if cs_src:
             _, src_dataoff, src_datasize, _ = cs_src
@@ -138,84 +116,73 @@ def main():
             print(f"   源二进制签名 blob: offset={src_dataoff:,} size={src_datasize:,} "
                   f"含 entitlements 槽={had_ent}")
 
-        cs = find_code_signature_cmd(new_raw)
-        if cs is None:
-            print("⚠️ 找不到 LC_CODE_SIGNATURE，跳过签名剥离")
-            csoff = None
-            cs_dataoff = None
-            cs_datasize = 0
-            cs_datasize_field = None
+        macho = inj.MachO(raw)
+        name = "@executable_path/Frameworks/BiliProbe.dylib"
+        if name in macho.dylibs:
+            print("② 主二进制已含该 LC_LOAD_DYLIB，跳过")
+            added_lc = 0
+            csoff, cs_dataoff, cs_datasize_now, cs_datasize_field = (
+                find_code_signature_cmd(raw) or (None, None, 0, None))
         else:
-            csoff, cs_dataoff, cs_datasize_now, cs_datasize_field = cs
-            cs_datasize = src_datasize if cs_src else cs_datasize_now
+            added_lc = macho.insert_load_dylib(name)
+            print(f"② 已追加 LC_LOAD_DYLIB（{added_lc} 字节），"
+                  f"ncmds {macho.ncmds} sizeofcmds {macho.sizeofcmds:,}")
+            cs = find_code_signature_cmd(macho.data)
+            if cs is None:
+                csoff = cs_dataoff = cs_datasize_field = None
+                cs_datasize_now = 0
+            else:
+                csoff, cs_dataoff, cs_datasize_now, cs_datasize_field = cs
             print(f"   注入后：dataoff={cs_dataoff:,} datasize={cs_datasize_now}（已被置 0）")
 
-        # 3) 写出最终 IPA
-        with zipfile.ZipFile(mid) as zin, \
-             zipfile.ZipFile(final, "w", zipfile.ZIP_DEFLATED, compresslevel=6,
-                             allowZip64=True) as zout:
-            for info in zin.infolist():
-                if info.filename == EXE:
-                    zi = zipfile.ZipInfo(EXE, date_time=info.date_time)
-                    zi.external_attr = info.external_attr
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zout.writestr(zi, new_raw)
-                else:
-                    zout.writestr(info, zin.read(info.filename))
-        shutil.move(final, OUT_IPA)
-        print(f"③ 输出: {OUT_IPA}  ({os.path.getsize(OUT_IPA):,} 字节)")
+        cs_datasize = src_datasize if cs_src else cs_datasize_now
 
-        # 3.5) 剥离原始 entitlements —— 这一步关系到能不能装上
+        # 3) 剥离原始签名 —— 这一步关系到能不能装上
         # 实测本脱壳包仍完整保留原始 entitlements，其中
         #   application-identifier = 746845GC96.tv.danmaku.bilianime  ← B站的 Team ID
         # 自签用的是用户自己的证书，team ID 必然不同。
         # 若把这些 entitlements 原样留在包里，某些签名工具会一并带过去，
         # 结果是「一启动就闪退」——而用户会以为是注入失败，白白浪费一轮真机测试。
-        # 因此这里把主二进制的签名整体抹掉，强制签名工具重新生成。
-        stripped = bytearray(new_raw)
+        # 做法：把 LC_CODE_SIGNATURE 的 datasize 置 0。
+        #   dataoff 保持不变（签名 blob 在文件末尾，原地扩展没有移动它）；
+        #   尾部 blob 本体留着（读不到，但不破坏结构），仍可用于查阅原始 entitlements。
+        # 就地改这一份 bytearray，不再拷第二份。
         if csoff is not None:
-            # 只把 datasize 置 0，dataoff 保持不变（签名 blob 在文件末尾，
-            # 原地扩展没有移动它）。偏移由 find_code_signature_cmd 给出。
-            struct.pack_into("<I", stripped, cs_datasize_field, 0)
-        # 上面只置空了 LC_CODE_SIGNATURE 指向的范围，文件尾部的 blob 留着
-        # （不影响加载，签名工具重签时会覆盖或忽略）
-        with zipfile.ZipFile(OUT_IPA) as zin, \
-             zipfile.ZipFile(OUT_IPA + ".tmp", "w", zipfile.ZIP_DEFLATED,
-                             compresslevel=6, allowZip64=True) as zout:
+            struct.pack_into("<I", macho.data, cs_datasize_field, 0)
+            print("③ 已剥离主二进制原有签名（datasize=0）")
+
+        # 4) 一次性写出最终 IPA（读原 IPA → 替换主二进制 → 追加 dylib）
+        #    早期版本先写一个 mid.ipa 再读回来改，白白多一轮 265MB 读写与一份内存拷贝。
+        #    「原地扩展」的契约是文件长度不变，所以先记下原始长度供自校验比对。
+        orig_exe_len = len(macho.data)
+        exec_bytes = bytes(macho.data)      # zipfile 需要 bytes-like
+        del macho
+        with zipfile.ZipFile(IPA) as zin, \
+             zipfile.ZipFile(final, "w", zipfile.ZIP_DEFLATED, compresslevel=6,
+                             allowZip64=True) as zout:
+            names = zin.namelist()
+            if DYLIB_IN_APP in names:
+                print("⚠️ 原 IPA 里已有 BiliProbe.dylib，将覆盖")
             for info in zin.infolist():
                 if info.filename == EXE:
                     zi = zipfile.ZipInfo(EXE, date_time=info.date_time)
                     zi.external_attr = info.external_attr
                     zi.compress_type = zipfile.ZIP_DEFLATED
-                    zout.writestr(zi, bytes(stripped))
+                    zout.writestr(zi, exec_bytes)
+                elif info.filename == DYLIB_IN_APP:
+                    continue                 # 由下面统一追加
                 else:
                     zout.writestr(info, zin.read(info.filename))
-        shutil.move(OUT_IPA + ".tmp", OUT_IPA)
-        print("④ 已剥离主二进制原有签名（避免 B站 Team ID 的 entitlements 被带过去）")
-        print("   原 entitlements 见 _recon/entitlements_probe.json，仅供查阅")
-        with open(os.path.join(ROOT, "deliver", "ORIGINAL-ENTITLEMENTS-PLEASE-READ.txt"),
-                  "wb") as f:
-            f.write(
-                "重要：请不要让签名工具沿用包内原有的 entitlements\n"
-                "================================================\n\n"
-                "这个脱壳包原本带的是 B站 的 entitlements，其中\n"
-                "  application-identifier = 746845GC96.tv.danmaku.bilianime\n"
-                "里的 Team ID 是 B站的（746845GC96），而你是用自己的证书签名，\n"
-                "Team ID 必然不同。\n\n"
-                "若签名工具把这些 entitlements 原样带过去，典型症状是\n"
-                "**一启动就闪退**。这会让人误以为是注入失败。\n\n"
-                "本包已经剥离了主二进制的原有签名以尽量避免这种情况，\n"
-                "但不同签名工具行为不一，所以：\n"
-                "  * 如果全能签里可以选，请让它「使用自己的证书重新生成 entitlements」\n"
-                "  * 如果 App 一启动就闪退，请先怀疑这一点，而不是先怀疑注入\n\n"
-                "另外这些权限自签本来也拿不到（需要 Apple 下发的 provisioning）：\n"
-                "  extended-virtual-addressing / increased-memory-limit（JIT 相关，视频类 App 常用）\n"
-                "  aps-environment=production（推送）\n"
-                "  associated-domains / applesignin / multicast / siri\n"
-                "失去它们会影响相应功能，但不影响注入验证本身。\n"
-                .encode("utf-8"))       # 显式 UTF-8 + LF：Windows 上文本模式会写成 CRLF
+            zi = zipfile.ZipInfo(DYLIB_IN_APP, date_time=(2026, 1, 1, 0, 0, 0))
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = 0o755 << 16
+            with open(DYLIB, "rb") as f:
+                zi_bytes = f.read()
+            zout.writestr(zi, zi_bytes)
+        shutil.move(final, OUT_IPA)
+        print(f"④ 输出: {OUT_IPA}  ({os.path.getsize(OUT_IPA):,} 字节)")
 
-        # 4) 自校验
+        # 5) 自校验
         print("\n--- 自校验 ---")
         problems = []
         with zipfile.ZipFile(OUT_IPA) as z:
@@ -226,7 +193,8 @@ def main():
                 problems.append("输出里没有 dylib")
             else:
                 got = z.read(DYLIB_IN_APP)
-                want = open(DYLIB, "rb").read()
+                with open(DYLIB, "rb") as f:
+                    want = f.read()
                 if got != want:
                     problems.append("dylib 内容不一致")
                 else:
@@ -243,13 +211,14 @@ def main():
                 problems.append("主二进制里没有 LC_LOAD_DYLIB")
             else:
                 print(f"  LC_LOAD_DYLIB 就位 ✓ 共 {len(m2.dylibs)} 条")
-            if len(b) != len(raw):
-                problems.append("主二进制长度变了")
+            if len(b) != orig_exe_len:
+                problems.append(f"主二进制长度异常: {len(b):,}（应保持 {orig_exe_len:,}）")
             else:
                 print(f"  主二进制长度未变 ✓ ({len(b):,} 字节)")
+            del b
 
             # 签名剥离必须真的生效，否则 B站 Team ID 的 entitlements 可能被带过去
-            cs2 = find_code_signature_cmd(b)
+            cs2 = find_code_signature_cmd(exec_bytes)
             if cs2 is None:
                 problems.append("输出里找不到 LC_CODE_SIGNATURE")
             else:
@@ -260,9 +229,7 @@ def main():
                     problems.append(f"dataoff 被误改：{cs_dataoff} → {do2}")
                 else:
                     print(f"  原有签名已剥离 ✓（datasize=0，dataoff 保持 {do2:,} 不变）")
-                # dataoff 未被改动，说明尾部原本的签名 blob 还留在原处，
-                # 仍然可以读出原始 entitlements（不可用，仅供查阅）
-                if parse_superblob_has_entitlements(b, do2, cs_datasize):
+                if parse_superblob_has_entitlements(exec_bytes, do2, cs_datasize):
                     print("  尾部原始签名 blob 仍在原处，可读出原始 entitlements ✓")
 
         if problems:
@@ -272,11 +239,10 @@ def main():
             return 1
         print("\n预注入版 IPA 组装完成 ✅")
         print("\n下一步（在手机上）：")
-        print(f"  1. 把 {os.path.basename(OUT_IPA)} 传到手机")
-        print("  2. 全能签打开它 → 用自己的证书签名安装")
+        print("  1. 全能签打开该 IPA → 用自己的证书签名安装")
         print("     （**不要**再启用插件注入 BiliProbe.dylib，否则加载两次）")
-        print("  3. 打开 App → 播一个视频 → **停留 45 秒以上**（探针 45 秒才写结论）")
-        print("  4. 文件 App → 我的 iPhone → 哔哩哔哩 → biliprobe/")
+        print("  2. 打开 App → 播一个视频 → **停留 60 秒以上**（中途别切出去）")
+        print("  3. 文件 App → 我的 iPhone → 哔哩哔哩 → biliprobe/ → 发 trace.log")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
