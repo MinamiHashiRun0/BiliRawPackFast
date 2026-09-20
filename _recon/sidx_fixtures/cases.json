@@ -1,0 +1,213 @@
+{
+  "source": "构造（非真实 m4s）",
+  "disclaimer": "IPA 内无真实媒体，夹具按 ISO 14496-12 自行构造，并经独立 Python 解析器复核；不能替代真实字节验证",
+  "cases": [
+    {
+      "name": "v0_all_direct",
+      "file": "v0_all_direct.bin",
+      "bytes": 248,
+      "expect_ok": true,
+      "note": "10 个直接媒体段",
+      "expected": {
+        "version": 0,
+        "timescale": 16000,
+        "earliest": 0,
+        "boxOffset": 96,
+        "count": 10,
+        "coveredBytes": 11665,
+        "entries": [
+          {
+            "offset": 1000,
+            "size": 1000,
+            "startTime": 0,
+            "duration": 4000
+          },
+          {
+            "offset": 2000,
+            "size": 1037,
+            "startTime": 4000,
+            "duration": 4000
+          },
+          {
+            "offset": 3037,
+            "size": 1074,
+            "startTime": 8000,
+            "duration": 4000
+          },
+          {
+            "offset": 4111,
+            "size": 1111,
+            "startTime": 12000,
+            "duration": 4000
+          },
+          {
+            "offset": 5222,
+            "size": 1148,
+            "startTime": 16000,
+            "duration": 4000
+          },
+          {
+            "offset": 6370,
+            "size": 1185,
+            "startTime": 20000,
+            "duration": 4000
+          },
+          {
+            "offset": 7555,
+            "size": 1222,
+            "startTime": 24000,
+            "duration": 4000
+          },
+          {
+            "offset": 8777,
+            "size": 1259,
+            "startTime": 28000,
+            "duration": 4000
+          },
+          {
+            "offset": 10036,
+            "size": 1296,
+            "startTime": 32000,
+            "duration": 4000
+          },
+          {
+            "offset": 11332,
+            "size": 1333,
+            "startTime": 36000,
+            "duration": 4000
+          }
+        ]
+      }
+    },
+    {
+      "name": "v1_64bit_offsets",
+      "file": "v1_64bit_offsets.bin",
+      "bytes": 136,
+      "expect_ok": true,
+      "note": "64 位 earliest/first_offset",
+      "expected": {
+        "version": 1,
+        "timescale": 48000,
+        "earliest": 1234567890123,
+        "boxOffset": 24,
+        "count": 6,
+        "coveredBytes": 24576,
+        "entries": [
+          {
+            "offset": 4294967296,
+            "size": 4096,
+            "startTime": 1234567890123,
+            "duration": 24000
+          },
+          {
+            "offset": 4294971392,
+            "size": 4096,
+            "startTime": 1234567914123,
+            "duration": 24000
+          },
+          {
+            "offset": 4294975488,
+            "size": 4096,
+            "startTime": 1234567938123,
+            "duration": 24000
+          },
+          {
+            "offset": 4294979584,
+            "size": 4096,
+            "startTime": 1234567962123,
+            "duration": 24000
+          },
+          {
+            "offset": 4294983680,
+            "size": 4096,
+            "startTime": 1234567986123,
+            "duration": 24000
+          },
+          {
+            "offset": 4294987776,
+            "size": 4096,
+            "startTime": 1234568010123,
+            "duration": 24000
+          }
+        ]
+      }
+    },
+    {
+      "name": "mixed_hier_and_empty",
+      "file": "mixed_hier_and_empty.bin",
+      "bytes": 116,
+      "expect_ok": true,
+      "note": "2 直接 + 2 层级 + 1 空段 → 应只剩 2 段",
+      "expected": {
+        "version": 0,
+        "timescale": 16000,
+        "earliest": 0,
+        "boxOffset": 24,
+        "count": 2,
+        "coveredBytes": 5120,
+        "entries": [
+          {
+            "offset": 800,
+            "size": 2048,
+            "startTime": 0,
+            "duration": 200
+          },
+          {
+            "offset": 2848,
+            "size": 3072,
+            "startTime": 200,
+            "duration": 300
+          }
+        ]
+      }
+    },
+    {
+      "name": "hier_only",
+      "file": "hier_only.bin",
+      "bytes": 80,
+      "expect_ok": false,
+      "note": "全是层级引用 → 无可用段",
+      "expected": null
+    },
+    {
+      "name": "unknown_version",
+      "file": "unknown_version.bin",
+      "bytes": 136,
+      "expect_ok": false,
+      "note": "version=2 不应猜",
+      "expected": null
+    },
+    {
+      "name": "timescale_zero",
+      "file": "timescale_zero.bin",
+      "bytes": 128,
+      "expect_ok": false,
+      "note": "时基为 0",
+      "expected": null
+    },
+    {
+      "name": "truncated_table",
+      "file": "truncated_table.bin",
+      "bytes": 92,
+      "expect_ok": false,
+      "note": "声明 100 段但段表数据不足",
+      "expected": null
+    },
+    {
+      "name": "no_sidx",
+      "file": "no_sidx.bin",
+      "bytes": 160,
+      "expect_ok": false,
+      "note": "只有 ftyp+moov",
+      "expected": null
+    },
+    {
+      "name": "zero_refs",
+      "file": "zero_refs.bin",
+      "bytes": 56,
+      "expect_ok": false,
+      "note": "reference_count=0",
+      "expected": null
+    }
+  ]
+}

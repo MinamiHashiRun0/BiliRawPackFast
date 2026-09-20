@@ -14,6 +14,8 @@ _recon/strings_all.txt
 _recon/objc_methods.tsv
 _recon/keyword_groups.json
 _recon/recon.json
+# 注意：_recon/sidx_fixtures/ 是**自行构造**的测试夹具（非官方数据），
+# 需要入库供 CI 使用，故不在此忽略。
 
 # 构建产物
 dist/

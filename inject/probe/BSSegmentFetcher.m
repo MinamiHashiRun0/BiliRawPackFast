@@ -151,7 +151,9 @@
 /// 原因：B站 m4s 的 upsig/uparams/hdnts 签名同时绑定路径与查询串，
 /// 换 host 时若改动其他部分签名会失效。
 - (NSURL *)requestURLForSegment:(NSUInteger)idx attempt:(NSUInteger)attempt {
-    BSSegmentRange r = _segmentAt(idx);
+    // 注意：这里刻意不取段范围。URL 只由 baseURL 的路径/查询串 + host 决定，
+    // 段信息只影响 Range 头。第一版在这里取了一次段范围却没用，
+    // 被 -Wall 判为 unused variable 且构建开了 -Werror → 直接构建失败。
     NSURLComponents *c = [NSURLComponents componentsWithURL:_baseURL resolvingAgainstBaseURL:NO];
 
     if (_hosts.count > 0) {

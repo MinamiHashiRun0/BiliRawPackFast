@@ -1,36 +1,34 @@
-feat(cdn): Objective-C 版并发分段引擎 + SIDX 解析器（阶段 3 主体，待真机接线）
+fix(cdn): 修 unused variable 构建失败 + 补 SIDX 夹具生成与真实 IPA 端到端注入演练
 
-新增两个可独立编译/验证的单元，均已加入 Theos 构建（CI 负责类型与语法验证）：
+1) 构建失败修复
+   BSSegmentFetcher.m:154 error: unused variable 'r' [-Werror,-Wunused-variable]
+   成因：requestURLForSegment: 里取了一次段范围却没用上（URL 只由 baseURL 的
+   路径/查询串 + host 决定，段信息只影响 Range 头）。删掉即可。
+   该类错误本地无法发现（Windows 上没有 clang 的 ObjC 前端），只能靠 CI。
 
-BSSidxIndex.{h,m} —— ISO BMFF SIDX 解析
-  * 顶层 box 遍历找 sidx，支持 v0/v1、size==1 的 64 位长度、size==0 延伸到末尾
-  * reference_type 判读按**真实字节语义**：bit31=0 表示直接媒体段，低位 31bit 是段大小
-    这一点在 Dart 版上踩过坑（最初读反，且合成用例以同样错误语义"假绿"通过），
-    故此实现按真实语义写，并在头文件标注了该陷阱
-  * 越界/截断/时基为 0/未知版本一律返回 nil，绝不返回半成品
-  * 提供 segmentIndexForOffset: 二分查找、isSelfConsistent 自检
-  * 已知限制：只处理第一个 sidx，不支持层级/多 sidx
+2) 真实 IPA 端到端注入演练（_recon/test_inject_real_ipa.py）
+   此前 inject_dylib.py 只在「合成 Mach-O」与「真实二进制的内存副本」上验证过，
+   没跑过完整的 IPA 读写往返；workflow 的 --ipa 分支也从未真正执行。
+   现在补上，并用真实 IPA（277MB）实测：
+     zip 条目集合一致 ✓ (2825 个)
+     主二进制长度不变 ✓ (630,083,392 字节)
+     ncmds 145 → 146，sizeofcmds 16,096 → 16,168 (+72) ✓
+     LC_LOAD_DYLIB 已加入 ✓ 共 98 条
+     LC_CODE_SIGNATURE dataoff 614,459,904 → 614,459,976 (+72) ✓
+     逐字节差异 52 处，**落在允许区外 0 处** ✓
+   即注入对真实 IPA 的影响面严格限定为「header 计数 / 新命令 / 签名 dataoff」。
+   注：本脚本第一版把 dataoff 字段位置写成命令起始+8，误报 1 字节越界；
+      实测该字段在命令起始+16。修正后归零 —— 核对脚本自己也要用实测偏移。
 
-BSSegmentFetcher.{h,m} —— 段表驱动的并发拉取
-  与 _recon/segment_fetcher_ref.py 状态机同构（那份已在本地对限速 Range 服务器
-  验证：40 段按序交付逐字节正确、并发 8 实测 8.02× 提速、坏 host 降级、
-  全失效时显式报错不交付残片）。
-  并发模型：所有共享状态只在一条串行队列上访问 → 不需要锁；
-  NSURLSession 回调统一回到该队列；交付（onData）按段号递增串行发出，
-  上层可直接喂给 AVAssetResourceLoadingRequest.dataRequest，不会重入。
-  换 host 只替换 authority：因 m4s 的 upsig/uparams/hdnts 签名同时绑定
-  路径与查询串，改动其他部分会让签名失效。
-  显式识别「服务端忽略 Range」（返回 200 且长度不符）并当作失败重试，
-  避免把整文件当段数据用。
-
-本地闸门修正（重要）：
-  _recon/check_objc.py 第一版用正则剥离 @"..." 字符串，被转义与 % 格式串干扰后
-  假报「圆括号不平衡 -1」。改用字符级状态机后确认三个文件括号全平衡。
-  假报比漏报更糟 —— 会让人开始忽略这个闸门，故一并修掉。
-  同时把检查范围从单文件扩到 inject/probe/*.m，并新增
-  「readonly 属性既无 getter 也无 _ivar」检查。
-
-未验证项（如实披露）：
-  * 两个新文件**从未在真机或本地运行过**，只有 CI 编译通过
-  * 与 Python 参考实现的一致性只在语义层面对齐，没有跑同一组用例做差分测试
-  * 尚未接进 AVAssetResourceLoader delegate（接线点依赖探针回传的真实 scheme）
+3) SIDX 测试夹具（_recon/gen_sidx_fixtures.py + _recon/sidx_fixtures/）
+   先查了 IPA 内是否有真实 m4s 可当夹具：只有 21 个内置音频/视频小文件，
+   **均不含 sidx**（B站视频是运行时下载的）。因此没有真实样本可用，
+   如实记录，不伪造。
+   改为按 ISO/IEC 14496-12 构造 9 个夹具，并用独立 Python 解析器复核：
+     v0_all_direct / v1_64bit_offsets / mixed_hier_and_empty  → 应成功
+     hier_only / unknown_version / timescale_zero /
+     truncated_table / no_sidx / zero_refs                    → 应失败
+   其中 mixed_hier_and_empty 专门覆盖「层级引用与空段必须跳过而非当段用」。
+   生成过程中两次算错 reference_count 偏移（先漏 box header 8B，再漏 reserved 2B），
+   都被夹具自身的断言当场抓住 —— 夹具自身可验证是这次的关键。
+   用途：将来在 macOS 上对拍 BSSidxIndex.m；CI 侧另行用纯 C 核心 + clang 跑。
