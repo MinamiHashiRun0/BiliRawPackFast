@@ -22,7 +22,39 @@
 | ⑤ 产物独立复核 | ✅ 完成 | `_recon/verify_dylib.py` 全项通过 |
 | ⑥ **真机验证注入是否加载** | ⏳ **等用户执行** | 见下方「真机步骤」 |
 | ⑦ CDN 重定向 | ⏳ 未开始 | 已定位 hook 点与候选配置键 |
-| ⑧ 并发分段下载 | 🔶 算法已验证，待移植 | `_recon/segment_fetcher_ref.py` 4/4 通过 |
+| ⑧ 并发分段下载 | 🔶 引擎已写完并编译通过；SIDX 解析器已用夹具实测 | 见下方「已验证 / 未验证」 |
+
+### ⑧ 的验证状态（分层，务必分清）
+
+SIDX 解析被刻意拆成「纯 C 核心 + ObjC 薄外壳」，于是验证也分两层：
+
+| 层 | 如何验证 | 状态 |
+|---|---|---|
+| **纯 C 核心**（`BSSidxCore.c`） | Linux runner + clang + 9 个夹具，**真跑** | ✅ **已实测**（CI job `verify-sidx-core`，约 10 秒） |
+| ObjC 外壳（`BSSidxIndex.m`） | 只做 NSData→核心→结构的搬运 | ✅ 编译通过，未运行 |
+| 并发引擎（`BSSegmentFetcher.m`） | 算法已有 Python 同构实现 4/4 通过 | ✅ 编译通过；ObjC 版本体未运行 |
+
+夹具实测结果（CI 日志原文）：
+
+```
+✓ v0_all_direct.bin        段数=10  timescale=16000  covered=11665
+✓ v1_64bit_offsets.bin     段数=6   timescale=48000  covered=24576
+✓ mixed_hier_and_empty.bin 段数=2   （2 直接 + 2 层级 + 1 空段，层级与空段被正确跳过）
+✓ hier_only.bin            正确拒绝: NO_SEGMENT     （全层级引用）
+✓ unknown_version.bin      正确拒绝: BAD_VERSION    （version=2 不猜）
+✓ timescale_zero.bin       正确拒绝: BAD_TIMESCALE
+✓ truncated_table.bin      正确拒绝: TRUNCATED
+✓ no_sidx.bin              正确拒绝: NO_SIDX
+✓ zero_refs.bin            正确拒绝: NO_SEGMENT
+全部 9 个夹具通过 ✅
+```
+
+每个成功用例还额外自检：段字节和 == `covered_bytes`、段连续无空洞、二分查找抽查命中正确段号。
+
+> **夹具来源必须说清**：IPA 内没有真实 m4s（视频运行时下载），
+> 所以**没有真实样本**。这 9 个夹具是按 ISO/IEC 14496-12 自行构造、
+> 并经独立 Python 解析器复核的。它能证明「实现与规范一致」，
+> **不能**替代真实字节验证 —— 拿到真实 sidx 后应当补一组真实夹具。
 
 ### 已交付产物
 
@@ -200,12 +232,18 @@ Actions → `Build BiliProbe` → Run workflow。
   日志走异步队列、不阻塞调用方；且 `shouldWaitForLoading` 由 AVFoundation
   控制调用频率（非每帧），因此不应引入可观测卡顿 —— 但这一点**尚未真机验证**。
 - **注入可行性本身完全未验证。** 迄今所有结论都在二进制层（Mach-O 结构、依赖、
-  签名、字符串）与算法层（Python 参考实现），**没有一次真机运行**。
-  App 会不会被自身完整性检查干掉、dylib 能否被加载，只有装上才知道。
-- 注入版 IPA 那条路（workflow 的 `--ipa` 分支）**从未真正执行过** ——
-  今天没有可用的 IPA 直链，该步骤被跳过。
+  签名、字符串）、算法层（Python 参考实现）与纯 C 核心层（夹具实测），
+  **没有一次真机运行**。App 会不会被自身完整性检查干掉、dylib 能否被加载，
+  只有装上才知道。
+- 注入版 IPA 那条路（workflow 的 `--ipa` 分支）**仍未在 CI 里执行过** ——
+  今天没有可用的 IPA 直链，该步骤一直跳过。
+  不过其核心改写逻辑已用**真实 IPA** 做了端到端演练
+  （`_recon/test_inject_real_ipa.py`）：2825 个 zip 条目一致、主二进制长度不变、
+  ncmds +1、sizeofcmds +72、逐字节差异 52 处且**允许区外 0 处**。
+  缺的只是 macOS 上 `codesign` 那一步。
 - 脱壳包不含 `embedded.mobileprovision`，无法还原原始 entitlements；
   自签用最小集合，全能签签名时会替换成你证书对应值。
   workflow 会先尝试用 `codesign -d --entitlements :-` 从原签名里抽原始值。
-- 并发分段下载只有 **Python 参考实现**，Objective-C 版尚未编写；
-  CDN 重定向完全未开始。
+- SIDX 只处理文件里的**第一个** sidx；多 sidx / 层级索引不支持。
+- 并发引擎的 ObjC 版本**从未运行过**（只有编译 + Python 同构实现的行为验证）。
+- CDN 重定向完全未开始。
