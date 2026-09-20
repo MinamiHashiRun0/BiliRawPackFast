@@ -191,6 +191,10 @@ static _Atomic(int32_t) gCntPlayerVCAppear  = 0;  // 播放器视图控制器出
 static NSHashTable     *gLivePlayers        = nil; // 弱引用：活着的播放器实例
 static NSMutableDictionary<NSString *, NSNumber *> *gTaskHostHist = nil; // host -> 次数
 
+// 每个 hook 被调用的次数（键 = "类::选择子"）。放在这里是为了让结论段也能打印，
+// 从而一眼看出「哪些落点真的响了、哪些一次都没响」。
+static NSMutableDictionary<NSString *, NSNumber *> *gUrlHookHits = nil;
+
 static inline void ProbeBump(_Atomic(int32_t) *p) {
     atomic_fetch_add_explicit(p, 1, memory_order_relaxed);
 }
@@ -1172,6 +1176,21 @@ static void ProbeEmitVerdict(NSString *phase) {
          ProbeRead(&gCntTaskResume));
     PLog(@"verdict", @"播放器当前状态：\n%@", ProbePlayerSnapshot());
 
+    // ── 每个 hook 的命中次数：一眼看出哪些落点真的响了、哪些一次都没响 ──
+    if (gUrlHookHits.count) {
+        NSArray<NSString *> *keys = [gUrlHookHits.allKeys
+            sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                return [gUrlHookHits[b] compare:gUrlHookHits[a]];
+            }];
+        NSMutableString *t = [NSMutableString string];
+        for (NSString *k in keys) {
+            [t appendFormat:@"      %-72@ %@ 次\n", k, gUrlHookHits[k]];
+        }
+        PLog(@"verdict", @"各 hook 命中次数（%lu 个响过）：\n%@", (unsigned long)keys.count, t);
+    } else {
+        PLog(@"verdict", @"各 hook 命中次数：**一个都没响过**");
+    }
+
     // ── 全网任务 host 直方图：看 App 到底在请求谁 ──
     if (gTaskHostHist.count) {
         NSArray<NSString *> *hosts = [gTaskHostHist.allKeys
@@ -1963,8 +1982,6 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
 // 最后一项尤其关键：若 httpOpenDelegate 非空，说明 IJK 把网络完全交给了 App 自己
 // 的实现，这能一次性解释「为什么 NSURL 系观测点全为零」。
 
-static NSMutableDictionary<NSString *, NSNumber *> *gPlayerHookHits = nil;
-
 + (void)probe_hookPlayerLifecycle:(NSString *)clsName
                          selector:(NSString *)selName
                            shapes:(NSString *)shapes
@@ -1977,13 +1994,11 @@ static NSMutableDictionary<NSString *, NSNumber *> *gPlayerHookHits = nil;
     {
         NSString *key = [NSString stringWithFormat:@"%@::%@", clsName, selName];
         __block BOOL firstLogged = NO;
-        __block NSInteger hits = 0;
 
         BSPHookHandler before = ^(NSInvocation *inv, BOOL *skip) {
             (void)skip;
             ProbeBump(&gCntPlayerLifecycle);
             ProbeBumpHookHit(key);
-            @synchronized (gPlayerHookHits) { hits++; }
             if (!firstLogged) {
                 firstLogged = YES;
                 PLog(@"player", @"▶ 播放器生命周期首次命中：%@（%@）", key, label);
@@ -2072,9 +2087,7 @@ static NSString *ProbePlayerSnapshot(void) {
         gLivePlayers = [NSHashTable hashTableWithOptions:NSPointerFunctionsWeakMemory |
                                 NSPointerFunctionsObjectPointerPersonality];
     }
-    if (!gPlayerHookHits) gPlayerHookHits = [NSMutableDictionary dictionary];
     if (!gTaskHostHist) gTaskHostHist = [NSMutableDictionary dictionary];
-
     // ---- A. 播放器生命周期：拿到实例，之后由心跳轮询它自己报数 ----
     // shapes 全部取自真机 classes.txt 的 method_getTypeEncoding。
     {
