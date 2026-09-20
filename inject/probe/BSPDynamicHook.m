@@ -33,12 +33,9 @@ static NSMutableDictionary<NSString *, BSPHookEntry *> *gEntries = nil;   /* key
 static NSMutableArray<NSString *> *gOrder = nil;
 static NSLock *gLock = nil;
 static pthread_key_t gDepthKey;
-static pthread_once_t gOnce = PTHREAD_ONCE_INIT;
 
 /* 类自带的 forwardInvocation: IMP（若有），用于未命中时链式回退 */
 static NSMutableDictionary<NSString *, NSValue *> *gInheritedForward = nil;
-
-static void bsp_depth_key_init(void) { pthread_key_create(&gDepthKey, NULL); }
 
 static void bsp_init(void)
 {
@@ -48,7 +45,7 @@ static void bsp_init(void)
         gOrder    = [NSMutableArray array];
         gLock     = [[NSLock alloc] init];
         gInheritedForward = [NSMutableDictionary dictionary];
-        pthread_once(&gDepthKey, bsp_depth_key_init);
+        pthread_key_create(&gDepthKey, NULL);
     });
 }
 
@@ -431,10 +428,15 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
             @try { [inv getArgument:&obj atIndex:i]; } @catch (__unused NSException *ex) { obj = nil; }
             bsp_append_obj(s, obj, maxLen);
         } else if (c == ':' || c == '#') {
-            __unsafe_unretained id obj = nil;
-            @try { [inv getArgument:&obj atIndex:i]; } @catch (__unused NSException *ex) { obj = nil; }
-            if (c == '#') [s appendFormat:@"class(%@)", obj ? NSStringFromClass((Class)obj) : @"nil"];
-            else         [s appendFormat:@"sel(%@)", obj ? NSStringFromSelector((SEL)obj) : @"nil"];
+            if (c == '#') {
+                __unsafe_unretained id obj = nil;
+                @try { [inv getArgument:&obj atIndex:i]; } @catch (__unused NSException *ex) { obj = nil; }
+                [s appendFormat:@"class(%@)", obj ? NSStringFromClass((Class)obj) : @"nil"];
+            } else {
+                SEL sel = NULL;
+                @try { [inv getArgument:&sel atIndex:i]; } @catch (__unused NSException *ex) { sel = NULL; }
+                [s appendFormat:@"sel(%@)", sel ? NSStringFromSelector(sel) : @"nil"];
+            }
         } else if (c == '^' || c == '*') {
             void *p = NULL;
             @try { [inv getArgument:&p atIndex:i]; } @catch (__unused NSException *ex) { p = NULL; }

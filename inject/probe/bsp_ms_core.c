@@ -29,8 +29,6 @@ struct BSPMSPlanner {
     BSPHost h[BSP_MS_MAX_HOSTS];
 };
 
-static double bsp_now_or_zero(double now) { return now; }
-
 BSPMSPlanner *bsp_ms_create(int nhosts, double host_cap_Bps, double host_burst_B)
 {
     BSPMSPlanner *p;
