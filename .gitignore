@@ -36,3 +36,17 @@ deliver/
 
 # 第三方 IPA 的分析产物（字符串转储等），含第三方内容，不入库
 _thirdparty/
+
+# 真机回传的日志包（内含第三方 App 的运行时类转储，不入库）
+biliprobe*.zip
+_logs/
+_biliprobe/
+_biliprobe2/
+_biliprobe3/
+_biliprobe4/
+_biliprobe5/
+_biliprobe6/
+_biliprobe7/
+_biliprobe8/
+biliprobe/
+

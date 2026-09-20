@@ -115,6 +115,74 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/srv.pid")" 2>/dev/null || true
           fi
 
+  # ---------------------------------------------------------------- 多 CDN 调度核心
+  # 调度器（评分 + 令牌桶 + 分片规划）是纯 C，可在 Linux 上把行为真正跑出来：
+  # 公式是否与 stormdl 参考一致、令牌桶是否真的封住了每主机上限、
+  # 4 路并行相对单路的提速比。这些以前只有 Python 参考实现，C 侧从未执行过。
+  verify-ms-core:
+    name: Verify multi-CDN scheduler core (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile and run scheduler tests
+        run: |
+          set -euxo pipefail
+          cd inject/probe
+          clang --version
+          clang -std=c11 -Wall -Wextra -Werror -O2 -g \
+                -o /tmp/test_ms_core \
+                test_ms_core.c bsp_ms_core.c -lm
+          echo "编译通过"
+          /tmp/test_ms_core
+
+  # ---------------------------------------------------------------- 代理端到端
+  # 这是本项目的核心：把播放器的一条连接拆成多 CDN 并发分片。
+  # 只验「能编译」等于没验，所以这里起 N 个真限速上游 + 真 socket + 真 NSURLSession，
+  # 逐字节校验内容、校验 206/Content-Range、并比较相对单链路的提速比。
+  verify-proxy-e2e:
+    name: Run BSPProxyServer end-to-end (macOS, live HTTP)
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start fake multi-CDN servers
+        run: |
+          set -euxo pipefail
+          # 4 条上游，各 1 MiB/s，夹具 6 MiB
+          python3 "$GITHUB_WORKSPACE/_recon/serve_multi_cdn.py" 18081 4 6291456 1048576 \
+            > "$RUNNER_TEMP/cdn.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cdn.pid"
+          for i in $(seq 1 60); do
+            if grep -q "ALL READY" "$RUNNER_TEMP/cdn.log"; then echo "上游就绪"; break; fi
+            sleep 0.5
+          done
+          cat "$RUNNER_TEMP/cdn.log"
+          grep -q "ALL READY" "$RUNNER_TEMP/cdn.log" || { echo "上游未就绪"; exit 1; }
+          curl -fsS -r 0-15 -o /dev/null "http://127.0.0.1:18081/fixture.m4s"
+          curl -fsS -r 0-15 -o /dev/null "http://127.0.0.1:18084/fixture.m4s"
+
+      - name: Compile and run proxy E2E test
+        run: |
+          set -euxo pipefail
+          cd inject/probe
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
+                -isysroot "$SDK" -framework Foundation \
+                -I. -o /tmp/test_proxy_e2e \
+                test_proxy_e2e.m BSPProxyServer.m BSPCdnPool.m BSPDynamicHook.m bsp_ms_core.c
+          echo "编译通过"
+          /tmp/test_proxy_e2e 18081 4 6291456
+
+      - name: Stop servers
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/cdn.pid" ]; then kill "$(cat "$RUNNER_TEMP/cdn.pid")" 2>/dev/null || true; fi
+
   build:
     name: Build dylib
     runs-on: macos-26

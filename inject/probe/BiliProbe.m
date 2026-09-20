@@ -39,6 +39,11 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #include <stdatomic.h>
+#include <string.h>
+
+#import "BSPDynamicHook.h"
+#import "BSPCdnPool.h"
+#import "BSPProxyServer.h"
 
 // 构建身份由 Theos Makefile 通过 -D 传入。这里给兜底，
 // 使本文件在 Theos 之外（例如 macOS 上直接用 clang 编译做语法检查）也能编译。
@@ -157,6 +162,7 @@ static IMP ProbeReplaceMethod(Class cls, SEL sel, IMP newImp, const char *types)
 + (void)bootstrap;
 + (void)probe_installDelegateHooksOnClass:(Class)cls;
 + (void)probe_noteRecycleMiss:(NSString *)clsName sel:(NSString *)selName;
++ (void)probe_installStage23;
 @end
 
 /// 观测计数（供心跳使用）。
@@ -171,6 +177,11 @@ static _Atomic(int32_t) gCntRenewal            = 0;
 static _Atomic(int32_t) gCntAuthChallenge      = 0;
 static _Atomic(int32_t) gCntDidCancel          = 0;
 static _Atomic(int32_t) gCntDelegateClassHooked = 0;
+
+// 阶段 2/3：URL 重写相关计数
+static _Atomic(int32_t) gCntMediaUrlSeen   = 0;   // 看见媒体 URL 的次数
+static _Atomic(int32_t) gCntMediaUrlRewrite = 0;  // 真正改写成回环代理的次数
+static _Atomic(int32_t) gCntUrlHookFired   = 0;   // 任一 URL 承载 hook 被调用的次数
 
 static inline void ProbeBump(_Atomic(int32_t) *p) {
     atomic_fetch_add_explicit(p, 1, memory_order_relaxed);
@@ -419,11 +430,21 @@ static NSURLSessionDataTask *(*gOrigDataTaskCR)(id, SEL, NSURLRequest *, void (^
 static IMP gOrigDataTaskC = NULL;
 static IMP gOrigDataTaskD = NULL;
 
+/// 代理自己发出的上游分片请求带这个头，探针要主动无视它们，
+/// 否则一次播放会写上千行 [session] 日志，把真正有用的信息淹掉。
+static BOOL ProbeIsOurProxyUpstream(NSURLRequest *request) {
+    return [request valueForHTTPHeaderField:@"X-BSP-Upstream"] != nil;
+}
+
 static NSURLSessionDataTask *ProbeDataTaskWithRequestCompletion(id self, SEL _cmd,
                                                                NSURLRequest *request,
                                                                void (^handler)(NSData *, NSURLResponse *, NSError *)) {
     if (gOrigDataTaskCR == NULL && gOrigDataTaskC) {
         gOrigDataTaskCR = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))gOrigDataTaskC;
+    }
+    if (ProbeIsOurProxyUpstream(request)) {
+        if (gOrigDataTaskCR) return gOrigDataTaskCR(self, _cmd, request, handler);
+        return nil;
     }
     if (ProbeHostLooksLikeMedia(request.URL)) {
         ProbeBump(&gCntSessionMediaReq);
@@ -438,6 +459,12 @@ static NSURLSessionDataTask *ProbeDataTaskWithRequestCompletion(id self, SEL _cm
 }
 
 static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    if (ProbeIsOurProxyUpstream(request)) {
+        if (gOrigDataTaskD) {
+            return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))gOrigDataTaskD)(self, _cmd, request);
+        }
+        return nil;
+    }
     if (ProbeHostLooksLikeMedia(request.URL)) {
         ProbeBump(&gCntSessionMediaReq);
         PLog(@"session", @"媒体请求(无回调) method=%@ host=%@ range=%@\n          URL=%.360@",
@@ -1110,6 +1137,9 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t protos      = ProbeRead(&gCntProtocolCanInit);
     int32_t protoStarts = ProbeRead(&gCntProtocolStart);
     int32_t dlWithUrl   = ProbeRead(&gCntDlWithUrl);
+    int32_t urlHooks    = ProbeRead(&gCntUrlHookFired);
+    int32_t urlSeen     = ProbeRead(&gCntMediaUrlSeen);
+    int32_t urlRewrote  = ProbeRead(&gCntMediaUrlRewrite);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
@@ -1119,8 +1149,19 @@ static void ProbeEmitVerdict(NSString *phase) {
                      @"| 预加载=%d | URLProtocol=%d/%d | ★落盘=%d",
          hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
          preloads, protos, protoStarts, dlWithUrl);
+    PLog(@"verdict", @"阶段2/3：URL承载hook触发=%d 见到媒体URL=%d 已改写=%d | 代理请求=%lu 上游分片=%lu",
+         urlHooks, urlSeen, urlRewrote,
+         (unsigned long)[BSPProxyServer shared].totalRequests,
+         (unsigned long)[BSPProxyServer shared].rewrittenURLCount);
 
-    if (dlWithUrl > 0) {
+    if (urlRewrote > 0) {
+        PLog(@"verdict", @"★★★ 阶段 3 已生效！媒体 URL 已被改写进回环代理，"
+                         @"播放器字节现在走本地并发抓取。CDN 分担情况：\n%@",
+             [[BSPProxyServer shared] statsReport]);
+    } else if (urlHooks > 0) {
+        PLog(@"verdict", @"★★ URL 承载 hook 已被调用 %d 次，但没识别出 B 站媒体 URL —— "
+                         @"说明调用链对了、URL 特征没匹配上（看 [rewrite]/[hook] 行）", urlHooks);
+    } else if (dlWithUrl > 0) {
         PLog(@"verdict", @"★★★ 找到了！downloadWithUrl 命中 %d 次 —— "
                          @"这是「CDN URL + 落盘路径」的合流点，阶段 2/3 落点就是它"
                          @"（真实 host 见 [path] 行）", dlWithUrl);
@@ -1547,7 +1588,12 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"· BGMFragmentP2pDownloader2 不在运行时");
         }
 
-        // ③ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
+        // ③ 阶段 2/3：回环代理 + URL 改写 hook。
+        //    放在这里（而不是延后）的原因：IJK 播放内核与 DASH 分片对象可能在
+        //    用户点开视频前就被初始化，hook 必须尽早装。
+        [self probe_installStage23];
+
+        // ④ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -1583,7 +1629,8 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 beats++;
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 委托类=%d setDelegate=%d "
                               @"shouldWait=%d | NSURLSession=%d NSURLRequest=%d | "
-                              @"下载器=%d 段级下载=%d | 预加载=%d | URLProtocol=%d/%d | ★落盘=%d",
+                              @"下载器=%d 段级下载=%d | 预加载=%d | URLProtocol=%d/%d | ★落盘=%d "
+                              @"| 代理请求=%lu 改写=%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
                      ProbeRead(&gCntShouldWait),
@@ -1591,7 +1638,9 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                      ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask),
                      ProbeRead(&gCntPreloadCall),
                      ProbeRead(&gCntProtocolCanInit), ProbeRead(&gCntProtocolStart),
-                     ProbeRead(&gCntDlWithUrl));
+                     ProbeRead(&gCntDlWithUrl),
+                     (unsigned long)[BSPProxyServer shared].totalRequests,
+                     ProbeRead(&gCntMediaUrlRewrite));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
@@ -1604,6 +1653,247 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
         // 最后写一份「启动态」结论。放在心跳启动之后，日志顺序读起来才顺。
         // 这份只是保底（此时必然还没播放），信息量在侦察完成那份与 45 秒那份。
         ProbeWriteVerdict(@"启动即写（此时尚未播放，仅供参考）", true);
+    }
+}
+
+//=== 7. 阶段 2/3：CDN 重定向 + 并发分段 ======================================
+//
+// 之前七次真机都没抓到视频字节经过 NSURL 系 API，因为 IJK 是自研 FFmpeg 内核，
+// 走自己的 socket。所以唯一能同时掌握「URL」和「字节」的位置，就是
+// **把播放器要打开的 CDN URL 换成回环代理地址，让播放器自己连过来**。
+//
+// 本版新增两件事：
+//   A. 一套「按运行时真实 type encoding 安装」的安全 hook（BSPDynamicHook）。
+//      之前的崩溃正是因为 class_replaceMethod 的 types 只是元数据、不校验实现，
+//      签名猜错就会按错误布局读参数。现在 encoding 由真机 classes.txt 给出，
+//      且安装前会用 expectShapes 再校验一次参数形状，不符就拒绝安装。
+//   B. 回环 HTTP 代理（BSPProxyServer）：把 Range 切成 256 KiB 分片，
+//      按 stormdl 的评分 + 每主机令牌桶并发派发到多个 CDN host，
+//      按序写回；每主机速率用 AIMD 自适应；首片超时或全挂则 302 回源（fail-open）。
+//
+// 关闭开关：往 {Documents}/biliprobe/mode.txt 写 direct 即可完全不改写。
+
+typedef NS_ENUM(NSInteger, BSPUrlArgMode) {
+    BSPUrlArgIn    = 0,   // 改参数（第 argIndex 个，0=self 1=_cmd）
+    BSPUrlArgOut   = 1,   // 改返回值（after 阶段）
+    BSPUrlArgWatch = 2,   // 只看不改
+};
+
+static NSMutableDictionary<NSString *, NSNumber *> *gUrlHookHits = nil;
+
+static void ProbeBumpHookHit(NSString *key) {
+    @synchronized (gUrlHookHits) {
+        NSNumber *n = gUrlHookHits[key];
+        gUrlHookHits[key] = @(n.integerValue + 1);
+    }
+}
+
+/// 把 inv 里第 idx 个参数（或返回值）取出字符串表示
+static NSString *ProbeStringFromArg(NSInvocation *inv, NSUInteger idx, BOOL isReturn) {
+    __unsafe_unretained id obj = nil;
+    @try {
+        if (isReturn) {
+            const char *rt = inv.methodSignature.methodReturnType;
+            if (!rt || strcmp(rt, "@") != 0) return nil;
+            [inv getReturnValue:&obj];
+        } else {
+            [inv getArgument:&obj atIndex:idx];
+        }
+    } @catch (__unused NSException *ex) { return nil; }
+
+    if ([obj isKindOfClass:NSString.class])  return obj;
+    if ([obj isKindOfClass:NSURL.class])     return [(NSURL *)obj absoluteString];
+    return nil;
+}
+
+/// 若字符串是 B 站媒体 URL，返回应替换成的等价对象（保持原类型）
+static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) {
+    NSString *local;
+    if (![BSPCdnPool isMediaURL:s]) return nil;
+
+    ProbeBump(&gCntMediaUrlSeen);
+    if (outOriginal) *outOriginal = s;
+
+    if (![BSPProxyServer rewriteEnabled]) return nil;
+    local = [[BSPProxyServer shared] localURLFor:s];
+    if (!local) return nil;
+
+    ProbeBump(&gCntMediaUrlRewrite);
+    if ([original isKindOfClass:NSURL.class]) return [NSURL URLWithString:local];
+    return local;
+}
+
+/// 给一个「承载媒体 URL 的方法」装改写 hook。
+/// shapes 来自真机 classes.txt 的 method_getTypeEncoding，装前再校验一次。
++ (BOOL)probe_hookUrlCarrier:(NSString *)clsName
+                    selector:(NSString *)selName
+                        mode:(BSPUrlArgMode)mode
+                    argIndex:(NSUInteger)argIndex
+                      shapes:(NSString *)shapes
+                       label:(NSString *)label
+{
+    BOOL ok;
+    NSString *hitKey = [NSString stringWithFormat:@"%@::%@", clsName, selName];
+
+    BSPHookHandler before = nil;
+    BSPHookAfter   after  = nil;
+
+    if (mode == BSPUrlArgOut) {
+        after = ^(NSInvocation *inv) {
+            NSString *s = ProbeStringFromArg(inv, 0, YES);
+            NSString *orig = nil;
+            id repl;
+            if (!s) return;
+            repl = ProbeRewriteIfMedia(s, s, &orig);
+            if (!repl) return;
+            ProbeBumpHookHit(hitKey);
+            {
+                id strong = repl;   /* ARC：保证 setReturnValue 期间对象存活 */
+                [inv setReturnValue:&strong];
+            }
+            PLog(@"rewrite", @"★ [%@] %@ 返回值改写 host=%@ → 127.0.0.1:%u",
+                 label, hitKey, [BSPCdnPool hostOf:orig] ?: @"?", (unsigned)[BSPProxyServer shared].port);
+        };
+    } else {
+        before = ^(NSInvocation *inv, BOOL *skip) {
+            NSString *s;
+            NSString *orig = nil;
+            id repl;
+            (void)skip;
+            ProbeBump(&gCntUrlHookFired);
+            ProbeBumpHookHit(hitKey);
+
+            s = ProbeStringFromArg(inv, argIndex, NO);
+            if (!s) return;
+            repl = ProbeRewriteIfMedia(s, s, &orig);
+            if (!repl) return;
+
+            {
+                __unsafe_unretained id keep = repl;   /* 不改引用计数，只保证生命周期 */
+                [inv setArgument:&keep atIndex:argIndex];
+            }
+            PLog(@"rewrite", @"★ [%@] %@ 参数改写 host=%@ → 127.0.0.1:%u\n"
+                             @"     原: %.200@",
+                 label, hitKey, [BSPCdnPool hostOf:orig] ?: @"?",
+                 (unsigned)[BSPProxyServer shared].port, orig);
+        };
+    }
+
+    ok = [BSPDynamicHook hookClass:clsName selector:selName expectShapes:shapes
+                            before:before after:after];
+    if (ok) {
+        PLog(@"hook", @"✓ [阶段2/3] %@ :: %@  enc=%@", clsName, selName,
+             [BSPDynamicHook typeEncodingOfClass:clsName selector:selName] ?: @"?");
+    } else {
+        PLog(@"hook", @"✗ [阶段2/3] %@ :: %@ 未安装（类/方法不存在或参数形状不符）", clsName, selName);
+    }
+    return ok;
+}
+
++ (void)probe_installStage23 {
+    PLog(@"hook", @"──── 阶段 2/3：CDN 重定向 + 并发分段 ────");
+
+    if (!gUrlHookHits) gUrlHookHits = [NSMutableDictionary dictionary];
+
+    // 回环代理先起来；起不来就完全不改写（宁可不加速，也不能砸播放）
+    {
+        BSPProxyServer *p = [BSPProxyServer shared];
+        BOOL started = [p start];
+        if (started) {
+            PLog(@"proxy", @"✓ 回环代理已启动 http://127.0.0.1:%u/bsp/<token>（改写开关=%@）",
+                 (unsigned)p.port, [BSPProxyServer rewriteEnabled] ? @"开" : @"关(mode.txt=direct)");
+        } else {
+            PLog(@"proxy", @"✗ 回环代理启动失败 —— 本版不会改写任何 URL");
+        }
+    }
+
+    // ---- 表：类 / 选择子 / 模式 / 参数位置 / 期望参数形状 / 标签 ----
+    // shapes 全部来自真机 classes.txt 的 method_getTypeEncoding() 输出。
+    {
+        struct { const char *cls; const char *sel; BSPUrlArgMode mode; NSUInteger idx;
+                 const char *shapes; const char *label; } tbl[] = {
+            // IJKMediaPlayerItem：URL 真正进入播放内核的地方
+            {"IJKMediaPlayerItem", "willOpenUrl:",       BSPUrlArgIn, 2, "@",      "IJK即将打开"},
+            {"IJKMediaPlayerItem", "setUrl:",            BSPUrlArgIn, 2, "@",      "IJK设置URL"},
+            {"IJKMediaPlayerItem", "updateUrl:resolved:",BSPUrlArgIn, 2, "@B",     "IJK更新URL"},
+            {"IJKMediaPlayerItem", "updateUrlInfo:",     BSPUrlArgIn, 2, "@",      "IJK更新URL信息"},
+            {"IJKMediaPlayerItem", "callMeteredNetworkUrl:reasonType:", BSPUrlArgOut, 0, "@q", "IJK计费URL"},
+
+            // DASH 分片对象：静态分析确定的 URL 字段
+            {"IJKMediaAssetStreamSegment", "initWithUrl:", BSPUrlArgIn, 2, "@",    "IJK分片"},
+            {"IJKDashStreamItem", "setBaseUrl:",     BSPUrlArgIn, 2, "@",           "DASH主URL"},
+            {"IJKDashStreamItem", "setBackupUrl0:",  BSPUrlArgIn, 2, "@",           "DASH备URL0"},
+            {"IJKDashStreamItem", "setBackupUrl1:",  BSPUrlArgIn, 2, "@",           "DASH备URL1"},
+            {"IJKDashStreamItem", "initWithStreamId:bandwidth:baseUrl:fileSize:streamType:codecType:",
+                                  BSPUrlArgIn, 4, "ii@qii",                         "DASH构造"},
+            {"IJKDashStreamBridge", "setUrl:",       BSPUrlArgIn, 2, "@",           "DASH桥URL"},
+            {"IJKDashStreamBridge", "setBackupUrls:",BSPUrlArgIn, 2, "@",           "DASH桥备URL"},
+            {"IJKDashStreamBridge", "initWithMediaType:codecId:qn:bandwidth:url:backupUrls:",
+                                  BSPUrlArgIn, 6, "qqqq@@",                         "DASH桥构造"},
+
+            // 播放器入口（IJK FFmpeg 内核 与 AVPlayer 包装两条路都挂）
+            {"IJKFFMoviePlayerController", "initWithContentURL:withOptions:",       BSPUrlArgIn, 2, "@@", "播放器FFmpeg"},
+            {"IJKFFMoviePlayerController", "initWithContentURLString:withOptions:", BSPUrlArgIn, 2, "@@", "播放器FFmpegStr"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithContentURL:withOptions:",       BSPUrlArgIn, 2, "@@", "播放器FFPlay"},
+            {"IJKFFMoviePlayerControllerFFPlay", "initWithContentURLString:withOptions:", BSPUrlArgIn, 2, "@@", "播放器FFPlayStr"},
+            {"IJKFFMoviePlayerControllerFFPlay", "resetWithContentURLString:withOptions:", BSPUrlArgIn, 2, "@@", "播放器FFPlay重置"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "initWithContentURL:",       BSPUrlArgIn, 2, "@", "播放器AVP"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "initWithContentURLString:", BSPUrlArgIn, 2, "@", "播放器AVPStr"},
+            {"IJKFFMoviePlayerControllerAVPlayer", "createAssetWithUrl:",       BSPUrlArgIn, 2, "@", "播放器AVP建Asset"},
+
+            // 预加载
+            {"BBPlayerPreloadNextItem", "setPreloadUrl:", BSPUrlArgIn, 2, "@", "预加载URL"},
+        };
+
+        NSUInteger total = sizeof(tbl) / sizeof(tbl[0]);
+        NSUInteger installed = 0;
+        for (NSUInteger i = 0; i < total; i++) {
+            NSString *cn = tbl[i].cls ? [NSString stringWithUTF8String:tbl[i].cls] : nil;
+            NSString *sn = tbl[i].sel ? [NSString stringWithUTF8String:tbl[i].sel] : nil;
+            if (!cn.length || !sn.length) continue;
+            if (!NSClassFromString(cn)) {
+                PLog(@"hook", @"· [阶段2/3] %@ 不在运行时，跳过", cn);
+                continue;
+            }
+            if ([self probe_hookUrlCarrier:cn selector:sn mode:tbl[i].mode
+                                  argIndex:tbl[i].idx
+                                    shapes:tbl[i].shapes ? [NSString stringWithUTF8String:tbl[i].shapes] : @""
+                                     label:tbl[i].label ? [NSString stringWithUTF8String:tbl[i].label] : @""]) {
+                installed++;
+            }
+        }
+        PLog(@"hook", @"阶段 2/3 hook 安装完成：%lu/%lu", (unsigned long)installed, (unsigned long)total);
+        PLog(@"hook", @"已安装的转发 hook 全表：\n      %@",
+             [[BSPDynamicHook installedHooks] componentsJoinedByString:@"\n      "]);
+    }
+
+    // 落一份「真机真实签名」清单，便于离线核对（探针最大的价值之一）
+    {
+        NSMutableString *s = [NSMutableString string];
+        [s appendFormat:@"# 真机运行时 method type encoding（由 method_getTypeEncoding 直接读出）\n"];
+        [s appendFormat:@"# 时间 %@\n\n", [NSDate date]];
+        for (NSString *cn in @[@"IJKMediaPlayerItem", @"IJKDashStreamItem", @"IJKDashStreamBridge",
+                               @"IJKMediaPlayerWrapper", @"IJKFFMoviePlayerController",
+                               @"IJKFFMoviePlayerControllerFFPlay",
+                               @"IJKFFMoviePlayerControllerAVPlayer", @"IJKP2PManager",
+                               @"IJKP2PServerResolver", @"IJKP2PConfig", @"BBRResourceLoaderManager",
+                               @"BBRResourceLoader", @"BBRMediaDownloader",
+                               @"BBPlayerInteractiveResourcePreload",
+                               @"BBPlayerPreload", @"BBPlayerPreloadNextItem",
+                               @"IJKMediaAssetStreamSegment", @"BBResolverMediaPlayerItem"]) {
+            Class c = NSClassFromString(cn);
+            if (!c) { [s appendFormat:@"## %@ (不在运行时)\n\n", cn]; continue; }
+            [s appendFormat:@"## %@\n", cn];
+            unsigned int mc = 0;
+            Method *ms = class_copyMethodList(c, &mc);
+            for (unsigned int i = 0; i < mc && i < 400; i++) {
+                const char *t = method_getTypeEncoding(ms[i]);
+                [s appendFormat:@"    - %-60s %s\n", sel_getName(method_getName(ms[i])), t ?: "?"];
+            }
+            if (ms) free(ms);
+            [s appendString:@"\n"];
+        }
+        ProbeWriteFile(@"encodings.txt", s);
     }
 }
 
