@@ -211,6 +211,11 @@ static NSURLSessionDataTask *ProbeDataTaskWithRequestCompletion(id self, SEL _cm
                                                                void (^handler)(NSData *, NSURLResponse *, NSError *));
 static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request);
 
+// AVAsset / resourceLoader 真实类探测（ProbeNoteLoaderClass 里要用到，故前置声明）
+static void        ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue);
+static id          ProbeAssetLoaderGetter(id self, SEL _cmd);
+static id          ProbeAssetInitURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options);
+
 @implementation BiliProbe
 
 //=== 0. 转发与路由 ============================================================
@@ -539,6 +544,64 @@ static void ProbeDLTaskFromOffset(id self, SEL _cmd,
     }
 }
 
+//=== 2c. AVAsset 与 resourceLoader 的真实类 ====================================
+// 排掉一个会让前面所有结论失效的盲区：
+//   我只在 AVAssetResourceLoader **这个类**上替换了 setDelegate:queue:。
+//   若运行时对象其实是它的**私有子类**（如 AVAssetResourceLoaderInternal），
+//   那么消息会走子类的实现，我的 ProbeSetResourceLoaderDelegate 永远不会被调用，
+//   setDelegate 计数恒为 0 —— 看起来像"App 没用 AVPlayer"，其实只是没钩到真正的类。
+//   这两条 hook 用来定性：既证明播放器是不是 AVPlayer 系，也拿到 resourceLoader 的真实类。
+
+static _Atomic(int32_t) gCntAssetInit    = 0;
+static _Atomic(int32_t) gCntLoaderClass  = 0;
+
+static IMP gOrigAssetInitURL = NULL;
+static IMP gOrigAssetLoaderGet = NULL;
+
+/// 只记一次每个真实类名，避免刷屏
+static void ProbeNoteLoaderClass(Class c) {
+    static NSMutableSet *seen = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+    NSString *n = c ? NSStringFromClass(c) : @"(nil)";
+    @synchronized (seen) {
+        if ([seen containsObject:n]) return;
+        [seen addObject:n];
+    }
+    ProbeBump(&gCntLoaderClass);
+    PLog(@"asset", @"resourceLoader 的真实类 = %@  ← 若它不是 AVAssetResourceLoader，"
+                   @"则必须在**这个类**上挂 setDelegate:queue: 才有效", n);
+    // 顺手在这个真实类上也挂一遍（幂等）
+    if (c && c != NSClassFromString(@"AVAssetResourceLoader")) {
+        IMP prev = ProbeReplaceMethod(c, @selector(setDelegate:queue:),
+                                      (IMP)ProbeSetResourceLoaderDelegate, "v@:@@");
+        PLog(@"asset", @"  已在真实类 %@ 上挂 setDelegate:queue:（原 IMP=%p）", n, prev);
+    }
+}
+
+/// AVURLAsset.resourceLoader —— 拿到真实对象与其类
+static id ProbeAssetLoaderGetter(id self, SEL _cmd) {
+    id loader = nil;
+    if (gOrigAssetLoaderGet) {
+        loader = ((id (*)(id, SEL))gOrigAssetLoaderGet)(self, _cmd);
+    }
+    ProbeNoteLoaderClass(object_getClass(loader));
+    return loader;
+}
+
+/// AVURLAsset initWithURL:options: —— 证明播放器是否创建 AVAsset
+/// 做法与原探针不同：这次保存原 IMP 并调用它，返回**真实资产**（不再返回替代对象，
+/// 因为上一版分析过那样会打断资源创建；这里靠保存 IMP 既能观测又不破坏行为）。
+static id ProbeAssetInitURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options) {
+    ProbeBump(&gCntAssetInit);
+    PLog(@"asset", @"AVURLAsset initWithURL scheme=%@ host=%@\n          URL=%.300@",
+         URL.scheme ?: @"?", URL.host ?: @"?", URL.absoluteString ?: @"?");
+    if (gOrigAssetInitURL) {
+        return ((id (*)(id, SEL, id, id))gOrigAssetInitURL)(self, _cmd, URL, options);
+    }
+    return nil;
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -734,30 +797,30 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t reqBuilt    = ProbeRead(&gCntRequestConstructed);
     int32_t dlInit      = ProbeRead(&gCntMediaDownloaderInit);
     int32_t dlTask      = ProbeRead(&gCntMediaDownloadTask);
+    int32_t assetInit   = ProbeRead(&gCntAssetInit);
+    int32_t loaderCls   = ProbeRead(&gCntLoaderClass);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
-                     @"NSURLRequest=%d | BBRMediaDownloader=%d 段级下载=%d",
-         hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask);
+                     @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d",
+         hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls);
 
     if (dlTask > 0) {
-        PLog(@"verdict", @"OK 已抓到视频段级下载（downloadTaskFromOffset:length:toEnd: %d 次）"
-                         @"→ 阶段 2/3 落点确定：在 BBRMediaDownloader 上改 host"
-                         @"（多 CDN 池）+ 段级并发展开", dlTask);
+        PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 阶段 2/3 落点确定："
+                         @"BBRMediaDownloader（改 host + 段级并发）", dlTask);
+    } else if (assetInit > 0 || loaderCls > 0) {
+        PLog(@"verdict", @"OK 播放器确实在用 AVPlayer 系（AVURLAsset 创建 %d 次，"
+                         @"resourceLoader 真实类 %d 个）。但下载器未触发 → "
+                         @"数据可能来自 P2P 分支，或命中缓存", assetInit, loaderCls);
     } else if (dlInit > 0) {
-        PLog(@"verdict", @"警告 BBRMediaDownloader 已创建 %d 次但未到段级下载 —— "
-                         @"可能命中缓存，或被 P2P 分支接走。看 [mediadl] 行的 URL", dlInit);
+        PLog(@"verdict", @"警告 BBRMediaDownloader 已创建 %d 次但未到段级下载", dlInit);
     } else if (hookClasses > 0 && waits > 0) {
         PLog(@"verdict", @"OK 视频数据经 AVAssetResourceLoaderDelegate（shouldWait=%d）", waits);
-    } else if (reqBuilt > 0 || sessMedia > 0) {
-        PLog(@"verdict", @"警告 只有普通 HTTP 请求（NSURLRequest=%d / NSURLSession=%d），"
-                         @"没有任何视频下载器活动 → 视频很可能走 P2P 分支，或取日志时还没开始播",
-             reqBuilt, sessMedia);
     } else {
-        PLog(@"verdict", @"未命中 全部观测点为零（含视频下载器）。若确实在播放视频，"
-                         @"说明取日志时视频尚未开始 —— 请先播放、再取日志");
+        PLog(@"verdict", @"未命中 连 AVURLAsset 都没创建（%d）→ 播放器不是 AVPlayer 系，"
+                         @"或取日志时视频尚未开始。这是需要换注入思路的情形", assetInit);
     }
     PLog(@"verdict", @"=======================================");
 }
@@ -1006,10 +1069,21 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"✗ NSURLRequest 不在运行时（异常）");
         }
 
+        // ②d 证明播放器是否使用 AVPlayer 系，并拿到 resourceLoader 的真实类
+        //     （用于排除"没钩到私有子类"这个盲区）
+        Class auCls = NSClassFromString(@"AVURLAsset");
+        if (auCls) {
+            gOrigAssetInitURL = ProbeReplaceMethod(auCls, @selector(initWithURL:options:),
+                                                   (IMP)ProbeAssetInitURL, "@@:@@");
+            gOrigAssetLoaderGet = ProbeReplaceMethod(auCls, @selector(resourceLoader),
+                                                     (IMP)ProbeAssetLoaderGetter, "@@:");
+        } else {
+            PLog(@"hook", @"✗ AVURLAsset 不在运行时");
+        }
+
         // ②c 视频字节的实际下载器（依据 classes.txt 的真实方法表）
         Class dlCls = NSClassFromString(@"BBRMediaDownloader");
-        if (dlCls) {
-            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
+        if (dlCls) {            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
                                                 (IMP)ProbeDLInitWithURL, "@@:@@@");
             gOrigDLTask = ProbeReplaceMethod(dlCls, @selector(downloadTaskFromOffset:length:toEnd:),
                                              (IMP)ProbeDLTaskFromOffset, "v@:QQB");

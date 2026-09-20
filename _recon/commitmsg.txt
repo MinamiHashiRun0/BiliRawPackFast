@@ -1,50 +1,26 @@
-fix(tool): 重装脚本内存优化 + 交付新探针（含真机实测结论）
+feat(probe): 排除 resourceLoader 私有子类盲区 + 证明播放器是否 AVPlayer 系
 
-真机日志（用户回传 biliprobe.zip）给出的结论 —— 这是本轮最重要的事实：
+真机证据（横屏视频，播了 75 秒，02:19:07 起）：
+  02:19:22 beat1 与 02:20:22 beat5 的计数完全相同
+  （NSURLSession=2 NSURLRequest=14，且那 14 次全是启动时的 archive/*.json 与主题包）
+  → 视频字节完全绕开 NSURL 系 API。
 
-✅ **注入成功、可行**
-   [boot] 主程序=/private/var/containers/Bundle/Application/08A1B80B-…/bili-universal.app/bili-universal
-   [hook] 已替换 AVAssetResourceLoader :: setDelegate:queue:
-   [hook] 已替换 NSURLSession :: dataTaskWithRequest:completionHandler:
-   [hook] 已替换 NSURLSession :: dataTaskWithRequest:
-   [env]  系统 iOS 27.0 / 加载镜像 1283 个
-   越狱痕迹 9 个路径全部「不存在」→ 反调试/越狱检测未触发
-   运行时侦察成功：枚举 148,961 个类，写出 4000 个类的定向 dump
+但这暴露了我探针的一个**盲区**，必须先排掉再下结论：
+  我只在 AVAssetResourceLoader **这个类**上替换了 setDelegate:queue:。
+  若运行时对象其实是它的私有子类（如 AVAssetResourceLoaderInternal），
+  消息会走子类实现，我的探针永不被调用，setDelegate 恒为 0 ——
+  看起来像「App 没用 AVPlayer」，其实只是没钩到真正的类。
 
-✅ **抓到 CDN 选择点的真实签名**（此前只有方法名，签名是空白）
-   BBLiveBCQualityComponent  - _requestCDNNode    v16@0:8   （void，无参）
-                             - _requestCDNNodeV2  v16@0:8
-   BGMFragmentContext        - _startCDNDownloadWithPlayItem:  v24@0:8@16
-                             - _sendCDNRequestWithFragment:     v24@0:8@16
-   BGMFragmentDownloader     - _downloadCDNDataWithFragment:    v24@0:8@16
-   BGMMasterListProcessor    - _setCdnFirst:                    v24@0:8@16
-   BFCBandwidthManager       - bfcURLProtocolInjectorTransferRequest:          @24@0:8@16
-                             - bfcURLProtocolInjectorTransferRequest:response: @32@0:8@16@24
+新增两条 hook 用于定性：
+  * AVURLAsset - resourceLoader
+      取回对象并打印**真实类**；若真实类 != AVAssetResourceLoader，
+      立刻在该类上补挂 setDelegate:queue:（幂等）
+  * AVURLAsset - initWithURL:options:
+      打印 scheme/host/URL。这次保存原 IMP 并调用它、返回真实资产，
+      既不破坏行为又能观测（上一版刻意不钩它，是因为当时没法两全）。
 
-✅ **确认 15 个 AVAssetResourceLoaderDelegate 实现者**，含
-   BBRResourceLoaderManager / BBLiveBaseResourceLoaderManager / BBUperVIResourceLoaderManager
-
-❌ **心跳与 [verdict] 一行都没有**（计数 0），而其它日志全部正常
-   → 是探针缺陷：dispatch_source 定时器在真机上一次都没触发。
-     已在上一提交改为 NSTimer + 三处不依赖定时器的强制结论。
-
-⚠️ **本轮日志里没有任何视频数据请求**
-   shouldWait=0；[session] 命中的全是 i0.hdslb.com 的静态资源（png/svga/zip/json），
-   没有 m4s。需用户确认那次是否真的播放了视频（待确认，尚未得到答复）。
-
-本提交的代码改动（重装脚本的内存与结构问题）：
-  1. 修 MemoryError：原脚本同时持有 raw(bytes) + MachO 内部副本 + stripped(bytearray)
-     三份 630MB 数据 → 在可用内存 3.3GB 的机器上直接 OOM。
-     现在只保留一份 bytearray，并把「就地改」应用于该副本。
-  2. 合并两次整包重写：早期版本先写 mid.ipa（带 dylib）再整包重写一遍，
-     凭空多一轮 265MB 读写与一份内存拷贝。现在一次写出。
-  3. 修自校验里两处变量生命周期错误（del exec_bytes 早于校验使用、
-     以及用已删除的变量做长度比对）—— 改为记下 orig_exe_len 再比对。
-
-交付（局域网 http://192.168.0.176:8898/ ）：
-  bili-9.12.0-probe-injected.ipa  278,783,499 字节
-    SHA256 0AB78BAD0579826ACF97C0D7681A07DCCAA9C5BD879D1AF785D61E3A68F0E4BF
-  BiliProbe.dylib                 168,752 字节
-    SHA256 97D6D00D23429BF9A4FD5423B305901B0DB4F521C6EE053718456FFCB9BABA6F
-  自校验：dylib 内容一致 / 2825 条目全保留 / LC_LOAD_DYLIB 就位 /
-          主二进制长度未变 / 签名已剥离且 dataoff 未变
+[verdict] 分支相应调整为四种可执行结论：
+  段级下载>0            → 落点确定 BBRMediaDownloader（改 host + 段级并发）
+  AVURLAsset/加载器类>0 → 播放器是 AVPlayer 系，但下载器未触发 → 疑似 P2P 分支或缓存
+  委托 shouldWait>0     → 走资源加载委托，可接管
+  全零且 AVURLAsset=0   → 播放器不是 AVPlayer 系，需换注入思路

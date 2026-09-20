@@ -1,0 +1,88 @@
+02:19:07.160 [boot] ================ BiliProbe 已加载 ================
+02:19:07.167 [boot] 主程序=/private/var/containers/Bundle/Application/A45B1232-46A2-48E0-A34C-F06F965DBDF4/bili-universal.app/bili-universal PID=11327
+02:19:07.174 [io] ✓ 已写 environment.txt (847 字节)
+02:19:07.174 [env] 自检完成：系统 iOS 27.0 / 镜像 1283 个
+02:19:07.174 [hook] ✓ 已替换 AVAssetResourceLoader :: setDelegate:queue:
+02:19:07.174 [hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:completionHandler:
+02:19:07.174 [hook] ✓ 已替换 NSURLSession :: dataTaskWithRequest:
+02:19:07.174 [hook] ✓ 已替换 NSURLRequest :: initWithURL:
+02:19:07.175 [boot] 探针安装完毕，等待播放器触发…
+02:19:07.175 [boot] 心跳已启动：每 15 秒一次；侦察结束时与 45 秒后各强制写一份结论
+02:19:07.175 [verdict] =========== 结论 [启动即写（此时尚未播放，仅供参考）] ===========
+02:19:07.175 [verdict] 计数：已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession媒体请求=0 NSURLRequest媒体构造=0
+02:19:07.175 [verdict] ❌ 三个观测点（AVAssetResourceLoader / NSURLSession / NSURLRequest）**全部为零**。若你确实播放了视频，说明媒体请求不经过任何 NSURL 系 API（自研 socket 栈），需要换注入思路；若没播放，请播放后重取日志
+02:19:07.175 [verdict] =======================================
+02:19:07.466 [request] NSURLRequest 构造 host=i2.hdslb.com
+          URL=https://i2.hdslb.com/bfs/fawkes/dd/prod/iphone.zip
+02:19:07.467 [session] 媒体请求 method=GET host=i2.hdslb.com range=(无)
+          URL=https://i2.hdslb.com/bfs/fawkes/dd/prod/iphone.zip
+02:19:09.294 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/b9f49c9b33532c5d05f5ea701ecd063f81910e94.json
+02:19:09.295 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/8aee6952487d118b4207c1afa2fd38616bd7545a.json
+02:19:09.295 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/3ed718f59e9e9cf1ce148105c9db9559951d5a7d.json
+02:19:09.296 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/c9a20055b712068bfe293878639dc9066ba2690b.json
+02:19:10.320 [scan] 开始运行时侦察…
+02:19:14.908 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/b9f49c9b33532c5d05f5ea701ecd063f81910e94.json
+02:19:14.908 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/8aee6952487d118b4207c1afa2fd38616bd7545a.json
+02:19:14.908 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/3ed718f59e9e9cf1ce148105c9db9559951d5a7d.json
+02:19:14.909 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/c9a20055b712068bfe293878639dc9066ba2690b.json
+02:19:15.043 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/b9f49c9b33532c5d05f5ea701ecd063f81910e94.json
+02:19:15.043 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/8aee6952487d118b4207c1afa2fd38616bd7545a.json
+02:19:15.043 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/3ed718f59e9e9cf1ce148105c9db9559951d5a7d.json
+02:19:15.044 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/archive/c9a20055b712068bfe293878639dc9066ba2690b.json
+02:19:17.968 [request] NSURLRequest 构造 host=i0.hdslb.com
+          URL=https://i0.hdslb.com/bfs/activity-plat/static/20220406/c4a9becc6e5e0e555db370b87b6e4bac/cGKI45H89U.svga
+02:19:17.968 [session] 媒体请求 method=GET host=i0.hdslb.com range=(无)
+          URL=https://i0.hdslb.com/bfs/activity-plat/static/20220406/c4a9becc6e5e0e555db370b87b6e4bac/cGKI45H89U.svga
+02:19:22.176 [beat] 第 1 次心跳（约 15 秒）| 已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession=2 NSURLRequest=14
+02:19:27.720 [resloader]   ✔ 实现者: IJKFFMoviePlayerControllerAVPlayer
+02:19:27.759 [resloader]   ✔ 实现者: BBRResourceLoaderManager
+02:19:27.762 [resloader]   ✔ 实现者: BBLiveBaseResourceLoaderManager
+02:19:27.768 [resloader]   ✔ 实现者: BGMMediaRequestTask
+02:19:27.781 [resloader]   ✔ 实现者: BLKTTSMediaRequestTask
+02:19:27.794 [resloader]   ✔ 实现者: BBUperVIResourceLoaderManager
+02:19:27.923 [resloader]   ✔ 实现者: CloudAsset.LoadingRequestHandler
+02:19:27.983 [resloader]   ✔ 实现者: MADAVAssetResourceLoaderDelegate
+02:19:28.031 [resloader]   ✔ 实现者: WebCoreSharedBufferResourceLoaderDelegate
+02:19:28.032 [resloader]   ✔ 实现者: WebCoreAudioFileReaderLoaderDelegate
+02:19:28.032 [resloader]   ✔ 实现者: WebCoreAVFLoaderDelegate
+02:19:28.038 [resloader]   ✔ 实现者: LPAudio
+02:19:28.039 [resloader]   ✔ 实现者: LPVideo
+02:19:28.082 [resloader]   ✔ 实现者: FCAVAssetResourceLoader
+02:19:28.173 [resloader]   ✔ 实现者: VCPInMemoryAVAsset
+02:19:28.511 [io] ✓ 已写 resloader-delegates.txt (465 字节)
+02:19:28.928 [cdn] 命中: BGMMasterListProcessor (1 个选择子)
+02:19:28.931 [cdn] 命中: BGMFragmentDownloader (1 个选择子)
+02:19:28.933 [cdn] 命中: BGMFragmentContext (2 个选择子)
+02:19:28.985 [cdn] 命中: BBLivePlayerP2PServerItem (1 个选择子)
+02:19:28.987 [cdn] 命中: BBLivePlayerResolverHelper (1 个选择子)
+02:19:32.585 [cdn] 命中: BBUperUploadNetworkTool (2 个选择子)
+02:19:33.479 [cdn] 命中: BFCBandwidthManager (2 个选择子)
+02:19:34.348 [cdn] 命中: BBLiveBCQualityComponent (2 个选择子)
+02:19:34.615 [io] ✓ 已写 cdn-selectors.txt (751 字节)
+02:19:36.257 [classes] 类侦察完成：枚举 150202 个类，命中记录 4000 个
+02:19:36.272 [io] ✓ 已写 classes.txt (2819107 字节)
+02:19:36.272 [scan] 运行时侦察完成。日志目录：/var/mobile/Containers/Data/Application/BCBE731A-ED84-426B-8A57-09A2F6F54F2D/Documents/biliprobe
+02:19:36.272 [verdict] =========== 结论 [侦察完成] ===========
+02:19:36.273 [verdict] 计数：已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession媒体请求=2 NSURLRequest媒体构造=14
+02:19:36.273 [verdict] ⚠️ 媒体 URL 确实出现过（NSURLRequest 构造=14 / NSURLSession=2），但 AVAssetResourceLoader 未被使用（setDelegate=0 次）。→ 阶段 2 应改在这些点做重定向，而不是接资源加载委托。请把 trace.log 里 [request] / [session] 行发回，我据此定新 hook 点
+02:19:36.273 [verdict] =======================================
+02:19:37.175 [beat] 第 2 次心跳（约 30 秒）| 已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession=2 NSURLRequest=14
+02:19:52.176 [beat] 第 3 次心跳（约 45 秒）| 已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession=2 NSURLRequest=14
+02:19:52.176 [verdict] =========== 结论 [45 秒] ===========
+02:19:52.176 [verdict] 计数：已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession媒体请求=2 NSURLRequest媒体构造=14
+02:19:52.176 [verdict] ⚠️ 媒体 URL 确实出现过（NSURLRequest 构造=14 / NSURLSession=2），但 AVAssetResourceLoader 未被使用（setDelegate=0 次）。→ 阶段 2 应改在这些点做重定向，而不是接资源加载委托。请把 trace.log 里 [request] / [session] 行发回，我据此定新 hook 点
+02:19:52.177 [verdict] =======================================
+02:20:07.176 [beat] 第 4 次心跳（约 60 秒）| 已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession=2 NSURLRequest=14
+02:20:22.177 [beat] 第 5 次心跳（约 75 秒）| 已挂委托类=0 setDelegate=0 shouldWait=0 renewal=0 authChallenge=0 cancel=0 | NSURLSession=2 NSURLRequest=14
