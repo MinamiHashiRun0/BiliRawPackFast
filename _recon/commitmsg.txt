@@ -1,34 +1,36 @@
-fix(probe): ARC / ObjC 两处硬错误 + 新增本地静态闸门
+feat(cdn): Objective-C 版并发分段引擎 + SIDX 解析器（阶段 3 主体，待真机接线）
 
-CI 报错：
-  BiliProbe.m:194:10 error: bad receiver type 'SEL'
-  BiliProbe.m:195:16 error: cast of 'long long' to 'id' is disallowed with ARC
-  （同一模式重复 4 组）
+新增两个可独立编译/验证的单元，均已加入 Theos 构建（CI 负责类型与语法验证）：
 
-根因：
-  ① [_cmd isEqual:NSSelectorFromString(...)]
-     SEL 不是 Objective-C 对象，对它发消息非法 —— 应用 sel_isEqual()。
-     同时把它改成 dispatch_once 静态注册，避免热路径反复构造选择子。
-  ② ProbeRecycledCall 返回 id，而返回值来自 BOOL 方法，写了
-     (id)(long long)... 强转 —— ARC 下禁止整数与对象指针互转。
-     被挂的四个方法返回 BOOL 或 void，不是对象指针；
-     intptr_t 与 BOOL 在 arm64 上同在 x0 返回，ABI 一致，改用它。
-     路由器返回类型随之从 id 改为 intptr_t（前置声明一并改）。
+BSSidxIndex.{h,m} —— ISO BMFF SIDX 解析
+  * 顶层 box 遍历找 sidx，支持 v0/v1、size==1 的 64 位长度、size==0 延伸到末尾
+  * reference_type 判读按**真实字节语义**：bit31=0 表示直接媒体段，低位 31bit 是段大小
+    这一点在 Dart 版上踩过坑（最初读反，且合成用例以同样错误语义"假绿"通过），
+    故此实现按真实语义写，并在头文件标注了该陷阱
+  * 越界/截断/时基为 0/未知版本一律返回 nil，绝不返回半成品
+  * 提供 segmentIndexForOffset: 二分查找、isSelfConsistent 自检
+  * 已知限制：只处理第一个 sidx，不支持层级/多 sidx
 
-新增本地静态闸门（_recon/check_objc.py 第 6 组规则），把这两类
-「只有 CI 才会暴露」的写法在本地先抓掉：
-  6a 对 SEL 发消息
-  6b ARC 下整数转 id
-  6c 路由器返回类型必须是整数型
+BSSegmentFetcher.{h,m} —— 段表驱动的并发拉取
+  与 _recon/segment_fetcher_ref.py 状态机同构（那份已在本地对限速 Range 服务器
+  验证：40 段按序交付逐字节正确、并发 8 实测 8.02× 提速、坏 host 降级、
+  全失效时显式报错不交付残片）。
+  并发模型：所有共享状态只在一条串行队列上访问 → 不需要锁；
+  NSURLSession 回调统一回到该队列；交付（onData）按段号递增串行发出，
+  上层可直接喂给 AVAssetResourceLoadingRequest.dataRequest，不会重入。
+  换 host 只替换 authority：因 m4s 的 upsig/uparams/hdnts 签名同时绑定
+  路径与查询串，改动其他部分会让签名失效。
+  显式识别「服务端忽略 Range」（返回 200 且长度不符）并当作失败重试，
+  避免把整文件当段数据用。
 
-另外：本轮把并发分段引擎的**同构参考实现 + 本地验证台**写好并跑通
-（_recon/segment_fetcher_ref.py）。它是纯 Python + 限速 Range 服务器，
-在 Windows 上就能定量验证引擎语义，不需要 Mac：
-  测试1 乱序到达/40 段按序交付、逐段逐字节正确      ✔
-  测试2 并发提速：并发1 16.80s / 并发8 2.10s
-        实测 8.02×，理论 8.00×（单连接限速 256KB/s）  ✔
-  测试3 坏 host 自动重试并降级到备用 host，6/6 完整交付  ✔
-  测试4 全部 host 失效时显式报错且不交付任何残片        ✔
-这为阶段 3「并发分段」提供了可复用的算法基线：ObjC 版将按同一状态机
-（段表驱动 / 固定并发 / 乱序入槽 / 严格按段号交付 / 失败重试与换 host）
-实现，届时只需验证实现与基线的行为一致。
+本地闸门修正（重要）：
+  _recon/check_objc.py 第一版用正则剥离 @"..." 字符串，被转义与 % 格式串干扰后
+  假报「圆括号不平衡 -1」。改用字符级状态机后确认三个文件括号全平衡。
+  假报比漏报更糟 —— 会让人开始忽略这个闸门，故一并修掉。
+  同时把检查范围从单文件扩到 inject/probe/*.m，并新增
+  「readonly 属性既无 getter 也无 _ivar」检查。
+
+未验证项（如实披露）：
+  * 两个新文件**从未在真机或本地运行过**，只有 CI 编译通过
+  * 与 Python 参考实现的一致性只在语义层面对齐，没有跑同一组用例做差分测试
+  * 尚未接进 AVAssetResourceLoader delegate（接线点依赖探针回传的真实 scheme）
