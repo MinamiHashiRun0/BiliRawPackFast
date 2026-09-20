@@ -87,6 +87,32 @@ def check_python():
                                         % (os.path.relpath(fp, ROOT), e))
 
 
+def check_no_duplicate_parser():
+    """
+    防分叉闸门：SIDX 解析逻辑必须只有一份（BSSidxCore.c）。
+    一旦 ObjC 外壳里又长出 box 解析代码，被 Linux CI 验证的核心就与出货代码分叉了，
+    那些夹具测试立刻变成摆设。这是真实存在过的风险，故用闸门钉住。
+    """
+    core = os.path.join(ROOT, "inject", "probe", "BSSidxCore.c")
+    if not os.path.exists(core):
+        problems.append("找不到 BSSidxCore.c（SIDX 解析核心）")
+        return
+    pattern = re.compile(r"rd32|RD32|BOX_SIDX|kBoxSIDX|reference_count|refCount|0x73696478")
+    suspects = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, "inject", "probe")):
+        dirnames[:] = [d for d in dirnames if d not in {".theos"}]
+        for fn in filenames:
+            if not fn.endswith((".m", ".h")) or fn == "BSSidxCore.h":
+                continue
+            fp = os.path.join(dirpath, fn)
+            for i, line in enumerate(open(fp, encoding="utf-8", errors="replace"), 1):
+                if pattern.search(line):
+                    suspects.append("%s:%d %s" % (fn, i, line.strip()[:60]))
+    if suspects:
+        for s in suspects:
+            problems.append("SIDX 解析逻辑疑似重复实现（应只在 BSSidxCore.c）: " + s)
+
+
 print("=" * 66)
 print("构建前本地闸门")
 print("=" * 66)
@@ -98,6 +124,8 @@ check_line_endings()
 print("3. 行尾检查           %s" % ("✓" if not any("CRLF" in p for p in problems) else "✗"))
 check_python()
 print("4. Python 语法        %s" % ("✓" if not any("Python 语法" in p for p in problems) else "✗"))
+check_no_duplicate_parser()
+print("5. 解析逻辑唯一性     %s" % ("✓" if not any("重复实现" in p for p in problems) else "✗"))
 print()
 if problems:
     print("发现问题 %d 个：" % len(problems))

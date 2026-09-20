@@ -34,6 +34,31 @@ permissions:
     paths-ignore: ['**.md', 'docs/**', '_recon/**']
 
 jobs:
+  # ---------------------------------------------------------------- 纯 C 核心验证
+  # SIDX 解析是纯字节逻辑，与 Foundation 无关，因此可以抽成纯 C 在 Linux 上跑。
+  # 这样「解析器是否真的能解析规范字节」在 CI 里是真跑出来的，而不是只验证能编译。
+  # 相比 macOS 构建（约 1 分钟且要排队），这里约 10 秒，反馈快得多。
+  verify-sidx-core:
+    name: Verify SIDX core (Linux, real fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile and run fixture tests
+        run: |
+          set -euxo pipefail
+          cd inject/probe
+          clang --version
+          # -Werror：核心解析器必须零告警，否则说明有可疑写法
+          clang -std=c11 -Wall -Wextra -Werror -O1 -g \
+                -o /tmp/test_sidx_core \
+                test_sidx_core.c BSSidxCore.c
+          echo "编译通过"
+          ls -la "$GITHUB_WORKSPACE/_recon/sidx_fixtures/"
+          /tmp/test_sidx_core "$GITHUB_WORKSPACE/_recon/sidx_fixtures"
+
   build:
     name: Build dylib
     runs-on: macos-26

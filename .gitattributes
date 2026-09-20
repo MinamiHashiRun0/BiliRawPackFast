@@ -1,0 +1,16 @@
+# 测试夹具是二进制数据，必须禁止任何行尾/文本转换，
+# 否则 Git 在 Windows 上检出时可能改写字节，夹具与 cases.json 里的期望值就对不上了。
+*.bin binary -text -diff
+_recon/sidx_fixtures/*.bin binary
+
+# 源码与脚本统一 LF（CI 在 Linux/macOS 上跑，CRLF 会让 bash 报坏解释器）
+*.c    text eol=lf
+*.h    text eol=lf
+*.m    text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+Makefile text eol=lf
+
+# 文档保持原样
+*.md   text

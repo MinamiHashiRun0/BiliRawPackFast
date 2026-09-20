@@ -23,7 +23,7 @@ include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = BiliProbe
 
-BiliProbe_FILES = BiliProbe.m BSSidxIndex.m BSSegmentFetcher.m
+BiliProbe_FILES = BiliProbe.m BSSidxIndex.m BSSidxCore.c BSSegmentFetcher.m
 BiliProbe_FRAMEWORKS = Foundation UIKit AVFoundation
 BiliProbe_CFLAGS = -fobjc-arc -O2 -Wall -Wno-unused-parameter
 BiliProbe_LDFLAGS = -Wl,-install_name,@executable_path/Frameworks/BiliProbe.dylib

@@ -1,34 +1,29 @@
-fix(cdn): 修 unused variable 构建失败 + 补 SIDX 夹具生成与真实 IPA 端到端注入演练
+refactor(sidx): 解析核心抽成纯 C —— 让「解析语义」在 Linux CI 上真跑，而非只验证编译
 
-1) 构建失败修复
-   BSSegmentFetcher.m:154 error: unused variable 'r' [-Werror,-Wunused-variable]
-   成因：requestURLForSegment: 里取了一次段范围却没用上（URL 只由 baseURL 的
-   路径/查询串 + host 决定，段信息只影响 Range 头）。删掉即可。
-   该类错误本地无法发现（Windows 上没有 clang 的 ObjC 前端），只能靠 CI。
+动机（这是本轮最主要的改动）：
+  SIDX 解析此前只在 macOS runner 上验证「能编译」，从没用真实字节跑过。
+  但 SIDX 解析是纯字节逻辑、与 Foundation 无关 —— 完全可以抽成纯 C，
+  在 Linux runner 上用一行 clang 编译并跑夹具，约 10 秒出结果（macOS 约 1 分钟且排队）。
 
-2) 真实 IPA 端到端注入演练（_recon/test_inject_real_ipa.py）
-   此前 inject_dylib.py 只在「合成 Mach-O」与「真实二进制的内存副本」上验证过，
-   没跑过完整的 IPA 读写往返；workflow 的 --ipa 分支也从未真正执行。
-   现在补上，并用真实 IPA（277MB）实测：
-     zip 条目集合一致 ✓ (2825 个)
-     主二进制长度不变 ✓ (630,083,392 字节)
-     ncmds 145 → 146，sizeofcmds 16,096 → 16,168 (+72) ✓
-     LC_LOAD_DYLIB 已加入 ✓ 共 98 条
-     LC_CODE_SIGNATURE dataoff 614,459,904 → 614,459,976 (+72) ✓
-     逐字节差异 52 处，**落在允许区外 0 处** ✓
-   即注入对真实 IPA 的影响面严格限定为「header 计数 / 新命令 / 签名 dataoff」。
-   注：本脚本第一版把 dataoff 字段位置写成命令起始+8，误报 1 字节越界；
-      实测该字段在命令起始+16。修正后归零 —— 核对脚本自己也要用实测偏移。
+分层（关键是别让被测代码与出货代码分叉）：
+  inject/probe/BSSidxCore.{h,c}   纯 C 解析核心，无任何 ObjC/Foundation 依赖
+  inject/probe/BSSidxIndex.{h,m}  ObjC 外壳：NSData → 核心 → ObjC 结构，只做类型搬运
+  inject/probe/test_sidx_core.c   夹具测试程序（纯 C）
+  即：**出货走的就是被测试的那份核心**。
+  BSSidxIndex.m 已重写为薄外壳，解析逻辑一行不留（有闸门钉住，见下）。
 
-3) SIDX 测试夹具（_recon/gen_sidx_fixtures.py + _recon/sidx_fixtures/）
-   先查了 IPA 内是否有真实 m4s 可当夹具：只有 21 个内置音频/视频小文件，
-   **均不含 sidx**（B站视频是运行时下载的）。因此没有真实样本可用，
-   如实记录，不伪造。
-   改为按 ISO/IEC 14496-12 构造 9 个夹具，并用独立 Python 解析器复核：
-     v0_all_direct / v1_64bit_offsets / mixed_hier_and_empty  → 应成功
-     hier_only / unknown_version / timescale_zero /
-     truncated_table / no_sidx / zero_refs                    → 应失败
-   其中 mixed_hier_and_empty 专门覆盖「层级引用与空段必须跳过而非当段用」。
-   生成过程中两次算错 reference_count 偏移（先漏 box header 8B，再漏 reserved 2B），
-   都被夹具自身的断言当场抓住 —— 夹具自身可验证是这次的关键。
-   用途：将来在 macOS 上对拍 BSSidxIndex.m；CI 侧另行用纯 C 核心 + clang 跑。
+新增 CI job verify-sidx-core（ubuntu-latest）：
+  clang -std=c11 -Wall -Wextra -Werror -O1  编译后用 _recon/sidx_fixtures/ 跑 9 个夹具
+  每个成功用例额外自检：段字节和 == covered_bytes、段连续无空洞、
+  二分查找抽查命中正确段号
+
+新增本地闸门（preflight.py 第 5 项）：解析逻辑唯一性
+  扫描 inject/probe 下所有 .m/.h，若出现 rd32/BOX_SIDX/reference_count/0x73696478
+  等解析特征即报错 —— 防止有人（包括我）把解析逻辑抄回 ObjC 外壳，
+  那会让夹具测试变成摆设。这是真实存在过的分叉风险，故用闸门钉死。
+
+新增 .gitattributes：
+  *.bin 标记为 binary，禁止行尾/文本转换 —— 否则 Windows 检出时夹具字节被改写，
+  与 cases.json 里的期望值对不上。源码统一 LF（CI 在 Linux/macOS 跑）。
+
+未验证项：Linux job 尚未实际运行过（本次推送首次触发）；ObjC 侧仍只有编译验证。
