@@ -31,6 +31,25 @@ LC_CODE_SIGNATURE = 0x1D
 LC_SEGMENT_64 = 0x19
 
 
+def dylib_install_names(buf: bytes) -> list:
+    """直接扫 load command 列出全部 LC_LOAD_DYLIB 安装名。
+    为什么要单独一个函数：MachO 对象里的 dylibs 是**构造时**的快照，
+    insert_load_dylib 之后不会自动刷新 —— 拿它做自校验会误报"没有 LC_LOAD_DYLIB"。
+    （本轮就是这么误报的：明明注入成功，报告却说没有。）"""
+    if len(buf) < 32 or struct.unpack_from("<I", buf, 0)[0] != 0xFEEDFACF:
+        return []
+    ncmds = struct.unpack_from("<I", buf, 16)[0]
+    out, off = [], 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", buf, off)
+        if cmd == LC_LOAD_DYLIB:
+            nameoff = struct.unpack_from("<I", buf, off + 8)[0]
+            out.append(bytes(buf[off + nameoff:off + cmdsize])
+                       .split(b"\x00")[0].decode("utf-8", "replace"))
+        off += cmdsize
+    return out
+
+
 def find_code_signature_cmd(buf: bytes):
     """返回 (命令偏移, dataoff, datasize, datasize字段偏移)；找不到返回 None
 
@@ -152,37 +171,42 @@ def main():
             print("③ 已剥离主二进制原有签名（datasize=0）")
 
         # 4) 一次性写出最终 IPA（读原 IPA → 替换主二进制 → 追加 dylib）
-        #    早期版本先写一个 mid.ipa 再读回来改，白白多一轮 265MB 读写与一份内存拷贝。
-        #    「原地扩展」的契约是文件长度不变，所以先记下原始长度供自校验比对。
+        #    内存策略：主二进制 630MB，全程只保留 macho.data 这一份 bytearray。
+        #    写出时用 ZipFile.open(zi,'w') 流式写，**不再** exec_bytes = bytes(...)
+        #    那样会多出一份 630MB 副本 —— 在可用内存 2.6GB 的机器上直接 MemoryError。
+        #    自校验也从 macho.data 读，避免再复制。
         orig_exe_len = len(macho.data)
-        exec_bytes = bytes(macho.data)      # zipfile 需要 bytes-like
-        del macho
         with zipfile.ZipFile(IPA) as zin, \
              zipfile.ZipFile(final, "w", zipfile.ZIP_DEFLATED, compresslevel=6,
                              allowZip64=True) as zout:
             names = zin.namelist()
             if DYLIB_IN_APP in names:
                 print("⚠️ 原 IPA 里已有 BiliProbe.dylib，将覆盖")
+            # 先写 dylib 之外的所有条目
             for info in zin.infolist():
-                if info.filename == EXE:
-                    zi = zipfile.ZipInfo(EXE, date_time=info.date_time)
-                    zi.external_attr = info.external_attr
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zout.writestr(zi, exec_bytes)
-                elif info.filename == DYLIB_IN_APP:
-                    continue                 # 由下面统一追加
-                else:
-                    zout.writestr(info, zin.read(info.filename))
-            zi = zipfile.ZipInfo(DYLIB_IN_APP, date_time=(2026, 1, 1, 0, 0, 0))
-            zi.compress_type = zipfile.ZIP_DEFLATED
+                if info.filename == EXE or info.filename == DYLIB_IN_APP:
+                    continue
+                zout.writestr(info, zin.read(info.filename))
+            # 主二进制：流式写入（避免第二份 630MB 副本）
+            zi = zipfile.ZipInfo(EXE, date_time=(2026, 1, 1, 0, 0, 0))
             zi.external_attr = 0o755 << 16
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            with zout.open(zi, "w") as dst:
+                view = memoryview(macho.data)
+                step = 8 << 20                     # 8MB 一块
+                for off in range(0, len(view), step):
+                    dst.write(view[off:off + step])
+                del view
+            # dylib
+            zi2 = zipfile.ZipInfo(DYLIB_IN_APP, date_time=(2026, 1, 1, 0, 0, 0))
+            zi2.compress_type = zipfile.ZIP_DEFLATED
+            zi2.external_attr = 0o755 << 16
             with open(DYLIB, "rb") as f:
-                zi_bytes = f.read()
-            zout.writestr(zi, zi_bytes)
+                zout.writestr(zi2, f.read())
         shutil.move(final, OUT_IPA)
         print(f"④ 输出: {OUT_IPA}  ({os.path.getsize(OUT_IPA):,} 字节)")
 
-        # 5) 自校验
+        # 5) 自校验（全部从已读入内存的 macho.data 判断，不再读回 630MB）
         print("\n--- 自校验 ---")
         problems = []
         with zipfile.ZipFile(OUT_IPA) as z:
@@ -205,20 +229,18 @@ def main():
             else:
                 print(f"  原有 {len(n_in)} 个条目全部保留 ✓（共 {len(n_out)} 个）")
 
-            b = z.read(EXE)
-            m2 = inj.MachO(b)
-            if name not in m2.dylibs:
+            # 用直接扫描而不是 macho.dylibs —— 后者是构造时快照，注入后已过期
+            names_now = dylib_install_names(macho.data)
+            if name not in names_now:
                 problems.append("主二进制里没有 LC_LOAD_DYLIB")
             else:
-                print(f"  LC_LOAD_DYLIB 就位 ✓ 共 {len(m2.dylibs)} 条")
-            if len(b) != orig_exe_len:
-                problems.append(f"主二进制长度异常: {len(b):,}（应保持 {orig_exe_len:,}）")
+                print(f"  LC_LOAD_DYLIB 就位 ✓ 共 {len(names_now)} 条")
+            if len(macho.data) != orig_exe_len:
+                problems.append(f"主二进制长度异常: {len(macho.data):,}")
             else:
-                print(f"  主二进制长度未变 ✓ ({len(b):,} 字节)")
-            del b
+                print(f"  主二进制长度未变 ✓ ({orig_exe_len:,} 字节)")
 
-            # 签名剥离必须真的生效，否则 B站 Team ID 的 entitlements 可能被带过去
-            cs2 = find_code_signature_cmd(exec_bytes)
+            cs2 = find_code_signature_cmd(macho.data)
             if cs2 is None:
                 problems.append("输出里找不到 LC_CODE_SIGNATURE")
             else:
@@ -229,8 +251,9 @@ def main():
                     problems.append(f"dataoff 被误改：{cs_dataoff} → {do2}")
                 else:
                     print(f"  原有签名已剥离 ✓（datasize=0，dataoff 保持 {do2:,} 不变）")
-                if parse_superblob_has_entitlements(exec_bytes, do2, cs_datasize):
+                if parse_superblob_has_entitlements(macho.data, do2, cs_datasize):
                     print("  尾部原始签名 blob 仍在原处，可读出原始 entitlements ✓")
+
 
         if problems:
             print("\n发现问题：")
