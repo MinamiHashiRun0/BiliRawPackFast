@@ -418,6 +418,29 @@ static NSURLSessionDataTask *ProbeDataTaskWithRequest(id self, SEL _cmd, NSURLRe
     return nil;
 }
 
+//=== 2b. 第三观测点：NSURLRequest 的构造 ======================================
+// 为什么还要这一层：前两个观测点都假设请求最终经 NSURLSession 发出。
+// 若视频走自研 socket 栈（B站确有 P2P/MCDN 的自研传输），前两层可能都抓不到。
+// 而 NSURLRequest 是**更上游**的构造点 —— 只要 App 用 AVPlayer/NSURLSession
+// 系 API 发起媒体请求，URL 在这里必然出现一次。
+// 同样只对媒体域名记录，其余请求仅一次子串判断。
+
+static _Atomic(int32_t) gCntRequestConstructed = 0;
+
+static IMP gOrigReqInitURL = NULL;
+
+static id ProbeRequestInitWithURL(id self, SEL _cmd, NSURL *URL) {
+    if (ProbeHostLooksLikeMedia(URL)) {
+        ProbeBump(&gCntRequestConstructed);
+        PLog(@"request", @"NSURLRequest 构造 host=%@\n          URL=%.400@",
+             URL.host ?: @"?", URL.absoluteString ?: @"?");
+    }
+    if (gOrigReqInitURL) {
+        return ((id (*)(id, SEL, id))gOrigReqInitURL)(self, _cmd, URL);
+    }
+    return nil;
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -613,28 +636,32 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t auths       = ProbeRead(&gCntAuthChallenge);
     int32_t cancels     = ProbeRead(&gCntDidCancel);
     int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
+    int32_t reqBuilt    = ProbeRead(&gCntRequestConstructed);
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：已挂委托类=%d setDelegate=%d shouldWait=%d renewal=%d "
-                     @"authChallenge=%d cancel=%d NSURLSession媒体请求=%d",
-         hookClasses, setDel, waits, renewals, auths, cancels, sessMedia);
+                     @"authChallenge=%d cancel=%d | NSURLSession媒体请求=%d "
+                     @"NSURLRequest媒体构造=%d",
+         hookClasses, setDel, waits, renewals, auths, cancels, sessMedia, reqBuilt);
 
     if (hookClasses > 0 && waits > 0) {
         PLog(@"verdict", @"✅ 视频数据经 AVAssetResourceLoaderDelegate —— "
-                         @"阶段 2/3 可在该委托上接管（已抓到真实 URL 的话见 [resloader] 行）");
-    } else if (hookClasses > 0) {
-        PLog(@"verdict", @"⚠️ 委托 hook 已挂 %d 个类，但 shouldWait 从未触发："
-                         @"到此刻为止 App 没通过 AVAssetResourceLoader 取过数据。"
-                         @"若已播放视频 → 视频不走这条路，看 [session] 行找新注入点",
-             hookClasses);
+                         @"阶段 2/3 可在该委托上接管（真实 URL 见 [resloader] 行）");
+    } else if (reqBuilt > 0 || sessMedia > 0) {
+        PLog(@"verdict", @"⚠️ 媒体 URL 确实出现过（NSURLRequest 构造=%d / "
+                         @"NSURLSession=%d），但 AVAssetResourceLoader 未被使用"
+                         @"（setDelegate=%d 次）。"
+                         @"→ 阶段 2 应改在这些点做重定向，而不是接资源加载委托。"
+                         @"请把 trace.log 里 [request] / [session] 行发回，我据此定新 hook 点",
+             reqBuilt, sessMedia, setDel);
     } else if (setDel > 0) {
         PLog(@"verdict", @"⚠️ setDelegate:queue: 被调用 %d 次，但委托类钩子没挂上 —— "
                          @"探针自身缺陷，请回报本文件", setDel);
     } else {
-        PLog(@"verdict", @"❌ AVAssetResourceLoader 从未被使用（setDelegate 调用 0 次）。"
-                         @"NSURLSession 媒体请求=%d。"
-                         @"若两者都为 0 且你确实播了视频 → 需要换注入思路",
-             sessMedia);
+        PLog(@"verdict", @"❌ 三个观测点（AVAssetResourceLoader / NSURLSession / "
+                         @"NSURLRequest）**全部为零**。若你确实播放了视频，"
+                         @"说明媒体请求不经过任何 NSURL 系 API（自研 socket 栈），"
+                         @"需要换注入思路；若没播放，请播放后重取日志");
     }
     PLog(@"verdict", @"=======================================");
 }
@@ -855,6 +882,15 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"✗ NSURLSession 不在运行时（异常）");
         }
 
+        // ②b 第三观测点：NSURLRequest 构造（更上游，能覆盖不经 NSURLSession 的路径）
+        Class reqCls = NSClassFromString(@"NSURLRequest");
+        if (reqCls) {
+            gOrigReqInitURL = ProbeReplaceMethod(reqCls, @selector(initWithURL:),
+                                                 (IMP)ProbeRequestInitWithURL, "@@:@@");
+        } else {
+            PLog(@"hook", @"✗ NSURLRequest 不在运行时（异常）");
+        }
+
         // ③ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
@@ -891,12 +927,12 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 beats++;
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 已挂委托类=%d "
                               @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d "
-                              @"NSURLSession媒体请求=%d",
+                              @"| NSURLSession=%d NSURLRequest=%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
                      ProbeRead(&gCntShouldWait), ProbeRead(&gCntRenewal),
                      ProbeRead(&gCntAuthChallenge), ProbeRead(&gCntDidCancel),
-                     ProbeRead(&gCntSessionMediaReq));
+                     ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
