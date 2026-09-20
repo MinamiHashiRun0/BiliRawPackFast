@@ -1746,8 +1746,6 @@ typedef NS_ENUM(NSInteger, BSPUrlArgMode) {
     BSPUrlArgWatch = 2,   // 只看不改
 };
 
-static NSMutableDictionary<NSString *, NSNumber *> *gUrlHookHits = nil;
-
 static void ProbeBumpHookHit(NSString *key) {
     @synchronized (gUrlHookHits) {
         NSNumber *n = gUrlHookHits[key];
