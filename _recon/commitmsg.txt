@@ -1,25 +1,24 @@
-fix(tool): gh run download 不带 run id 会拿到缓存旧 artifact —— 差点交付错包
+feat(probe): 加缓存盘点 + 预加载观测点 —— 追查"视频在播但零网络流量"
 
-问题：本次构建产物是 171,072 字节 / SHA 6C733F14…，
-但 `gh run download --name BiliProbe-dylib`（不带 run id）取回的是
-**上一次缓存**的 168,960 字节 / SHA DC3FDD60…。
-两个 SHA 完全不同，我因为"大小与上轮相同"才发现异常 ——
-否则会把旧包当新包交给用户，又是一轮白跑。
+真机事实（第四次会话，横屏视频，用户确认"点了视频、看到画面在动、听了 65 秒"）：
+  02:29:53 起，心跳 1→5（15s→75s）计数完全冻结：
+    委托类=0 setDelegate=0 shouldWait=0 | NSURLSession=1 NSURLRequest=10
+    | 下载器init=0 段级下载=0 | AVURLAsset=1 加载器类=0
+  唯一命中的 [asset] 是占位视频：file:///…/bili-universal.app/blank.mp4
+  （我一度把它当成"视频走本地文件"，那条判断是错的，已在对话中更正）
+  → 真在播的视频，对全部网络层观测点是零流量。
 
-本次改为 `gh run download <run-id> --name …` 显式指定，取到正确产物。
-（注：GitHub 侧确实存在同名新 artifact，created_at 18:23:49，
-  所以是 gh 侧的解析/缓存问题，不是构建没跑。）
+新假设：视频在点进去之前已被**预下载**，播放读本地缓存，因此任何网络层 hook
+都不会触发。若成立，注入点必须上移到预加载/下载层。
 
-一并记录本轮真机结论（横屏视频，新探针，播 75 秒，02:19:07 起）：
-  02:19:22 beat1 与 02:20:22 beat5 计数完全相同
-  （NSURLSession=2 NSURLRequest=14；那 14 次全是启动时 archive/*.json 与主题包）
-  → 视频字节完全绕开 NSURL 系 API，且 AVAssetResourceLoader 未被使用。
+依据（来自 classes.txt 真实方法表）：
+  BBPlayerPreload  + keyWithOid:cid:      - preloadItems:unite:
+  BBPlayerInteractiveResourcePreload  - downloadWithUrl:savedPath:relativePath:
+  BBPlayerItemCache 只是 NSCache 语义（缓存 playerItem **对象**），不含视频字节
 
-  同时发现我探针的盲区：只在 AVAssetResourceLoader 类上替换了 setDelegate:queue:，
-  若运行时对象是其私有子类则永远不会被调用，setDelegate 恒为 0 ——
-  看起来像"App 没用 AVPlayer"，其实只是没钩到真正的类。本提交新增：
-    * AVURLAsset.resourceLoader  取回对象并打印**真实类**，若不是父类则就地补挂
-    * AVURLAsset.initWithURL:options:  打印 scheme/host/URL
-  用于把这一可能性排除掉。
-
-本包即含上述两条 hook。
+新增两条观测点：
+  1) BBPlayerPreload.preloadItems:unite:  记录是否在预加载
+  2) 缓存盘点：列出 App 沙盒 Library / Library/Caches 及常见视频缓存子目录的
+     目录结构与体积 —— 直接看有没有视频字节落盘、有多大
+     （只读，限条数，避免大目录卡住）
+[verdict] 与心跳同步加入「预加载」计数，并给出对应结论分支。

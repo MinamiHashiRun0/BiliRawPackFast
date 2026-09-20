@@ -216,6 +216,10 @@ static void        ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate
 static id          ProbeAssetLoaderGetter(id self, SEL _cmd);
 static id          ProbeAssetInitURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options);
 
+// 预加载与缓存盘点
+static void        ProbePreloadItems(id self, SEL _cmd, id items, BOOL unite);
+static void        ProbeDumpCaches(void);
+
 @implementation BiliProbe
 
 //=== 0. 转发与路由 ============================================================
@@ -602,6 +606,98 @@ static id ProbeAssetInitURL(id self, SEL _cmd, NSURL *URL, NSDictionary *options
     return nil;
 }
 
+//=== 3c. 缓存目录盘点 + 预加载 ================================================
+// 依据：真机三次会话里，视频在播但 BBRMediaDownloader 从未被创建（init=0）。
+// 最可能的解释是「视频在点进去之前已被预下载」，于是播放走本地缓存、不产生网络下载。
+// 若成立，则任何网络层 hook 都不会触发 —— 必须往**上游（预加载）**找。
+// 这两条观测点用来定性：
+//   ① 直接列出 App 沙盒里的缓存目录，看有没有视频字节落盘、多大
+//   ② 钩 BBPlayerPreload.preloadItems:unite: 看预加载是否在跑
+
+static _Atomic(int32_t) gCntPreloadCall = 0;
+static IMP gOrigPreloadItems = NULL;
+
+static void ProbePreloadItems(id self, SEL _cmd, id items, BOOL unite) {
+    ProbeBump(&gCntPreloadCall);
+    PLog(@"preload", @"★ BBPlayerPreload preloadItems:unite:%d items=%@",
+         (int)unite, items ? [NSString stringWithFormat:@"<%@>", NSStringFromClass([items class])] : @"(nil)");
+    if (gOrigPreloadItems) {
+        ((void (*)(id, SEL, id, BOOL))gOrigPreloadItems)(self, _cmd, items, unite);
+    }
+}
+
+/// 列出目录内容（只读、限深度与条数，避免大目录卡住）
+static void ProbeListDir(NSString *path, NSString *label, int maxEntries) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
+        PLog(@"cache", @"%@ 不存在: %@", label, path);
+        return;
+    }
+    if (!isDir) {
+        NSDictionary *a = [fm attributesOfItemAtPath:path error:NULL];
+        PLog(@"cache", @"%@ (文件) %llu 字节: %@", label,
+             [a[NSFileSize] unsignedLongLongValue], path);
+        return;
+    }
+    NSError *err = nil;
+    NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:path error:&err];
+    if (err) { PLog(@"cache", @"%@ 列举失败: %@", label, err.localizedDescription); return; }
+    unsigned long long total = 0;
+    NSUInteger n = 0;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *name in items) {
+        if (n++ >= (NSUInteger)maxEntries) { [lines addObject:@"  …(截断)"]; break; }
+        NSString *full = [path stringByAppendingPathComponent:name];
+        BOOL sub = NO;
+        [fm fileExistsAtPath:full isDirectory:&sub];
+        if (sub) {
+            // 子目录只算体积
+            NSDirectoryEnumerator *e = [fm enumeratorAtPath:full];
+            unsigned long long sz = 0; NSString *f2;
+            while ((f2 = [e nextObject])) {
+                NSDictionary *a = [e fileAttributes];
+                sz += [a[NSFileSize] unsignedLongLongValue];
+            }
+            total += sz;
+            [lines addObject:[NSString stringWithFormat:@"  [目录] %-42@ %10llu 字节",
+                              name, sz]];
+        } else {
+            NSDictionary *a = [fm attributesOfItemAtPath:full error:NULL];
+            unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
+            total += sz;
+            [lines addObject:[NSString stringWithFormat:@"  [文件] %-42@ %10llu 字节",
+                              name, sz]];
+        }
+    }
+    PLog(@"cache", @"===== %@ =====\n 路径: %@\n 合计 %llu 字节（%.2f MB），%lu 项\n%@",
+         label, path, total, (double)total / 1048576.0, (unsigned long)items.count,
+         [lines componentsJoinedByString:@"\n"]);
+}
+
+/// 盘点与视频缓存有关的目录
+static void ProbeDumpCaches(void) {
+    @autoreleasepool {
+        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *doc = docs.firstObject ?: @"";
+        NSString *lib = [doc stringByDeletingLastPathComponent];       // …/Library
+        NSString *caches = [lib stringByAppendingPathComponent:@"Caches"];
+
+        ProbeListDir(lib, @"Library", 40);
+        ProbeListDir(caches, @"Library/Caches", 60);
+        // 常见视频缓存目录名，逐个探测
+        for (NSString *sub in @[@"Caches/video", @"Caches/VideoCache", @"Caches/Player",
+                                @"Caches/com.bilibili.video", @"Caches/bilibili",
+                                @"Caches/MediaCache", @"Caches/BFCPlayer"]) {
+            NSString *p = [lib stringByAppendingPathComponent:sub];
+            if ([NSFileManager.defaultManager fileExistsAtPath:p]) {
+                ProbeListDir(p, [@"Library/" stringByAppendingString:sub], 60);
+            }
+        }
+        PLog(@"cache", @"缓存盘点完成");
+    }
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -799,28 +895,32 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t dlTask      = ProbeRead(&gCntMediaDownloadTask);
     int32_t assetInit   = ProbeRead(&gCntAssetInit);
     int32_t loaderCls   = ProbeRead(&gCntLoaderClass);
+    int32_t preloads    = ProbeRead(&gCntPreloadCall);
     // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
     // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
-                     @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d",
-         hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls);
+                     @"NSURLRequest=%d | 下载器init=%d 段级下载=%d | AVURLAsset=%d 加载器类=%d "
+                     @"| 预加载=%d",
+         hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
+         preloads);
 
     if (dlTask > 0) {
         PLog(@"verdict", @"OK 已抓到视频段级下载（%d 次）→ 阶段 2/3 落点确定："
                          @"BBRMediaDownloader（改 host + 段级并发）", dlTask);
-    } else if (assetInit > 0 || loaderCls > 0) {
-        PLog(@"verdict", @"OK 播放器确实在用 AVPlayer 系（AVURLAsset 创建 %d 次，"
-                         @"resourceLoader 真实类 %d 个）。但下载器未触发 → "
-                         @"数据可能来自 P2P 分支，或命中缓存", assetInit, loaderCls);
-    } else if (dlInit > 0) {
-        PLog(@"verdict", @"警告 BBRMediaDownloader 已创建 %d 次但未到段级下载", dlInit);
+    } else if (preloads > 0) {
+        PLog(@"verdict", @"★ 预加载在跑（%d 次）但没有段级下载 → 视频是**提前预下载**好的，"
+                         @"播放走本地缓存。阶段 2 的落点应上移到预加载/下载层，"
+                         @"而不是播放期的网络层", preloads);
+    } else if (assetInit > 0) {
+        PLog(@"verdict", @"AVURLAsset 已创建 %d 次但下载器与预加载都没动 → "
+                         @"播放走本地缓存（可能是更早的预下载，或磁盘缓存命中）", assetInit);
     } else if (hookClasses > 0 && waits > 0) {
         PLog(@"verdict", @"OK 视频数据经 AVAssetResourceLoaderDelegate（shouldWait=%d）", waits);
     } else {
-        PLog(@"verdict", @"未命中 连 AVURLAsset 都没创建（%d）→ 播放器不是 AVPlayer 系，"
-                         @"或取日志时视频尚未开始。这是需要换注入思路的情形", assetInit);
+        PLog(@"verdict", @"未命中 连 AVURLAsset 都没创建 → 播放器不是 AVPlayer 系，"
+                         @"或取日志时视频尚未开始");
     }
     PLog(@"verdict", @"=======================================");
 }
@@ -1081,6 +1181,20 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"✗ AVURLAsset 不在运行时");
         }
 
+        // ②e 预加载（若视频是提前下好的，网络层 hook 永远不会触发）
+        Class plCls = NSClassFromString(@"BBPlayerPreload");
+        if (plCls) {
+            gOrigPreloadItems = ProbeReplaceMethod(plCls, @selector(preloadItems:unite:),
+                                                   (IMP)ProbePreloadItems, "v@:@@B");
+        } else {
+            PLog(@"hook", @"· BBPlayerPreload 不在运行时");
+        }
+        // 缓存盘点延后 3 秒，等 App 初始化写入完毕
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            ProbeDumpCaches();
+        });
+
         // ②c 视频字节的实际下载器（依据 classes.txt 的真实方法表）
         Class dlCls = NSClassFromString(@"BBRMediaDownloader");
         if (dlCls) {            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
@@ -1134,12 +1248,13 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 beats++;
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 委托类=%d setDelegate=%d "
                               @"shouldWait=%d | NSURLSession=%d NSURLRequest=%d | "
-                              @"下载器init=%d 段级下载=%d",
+                              @"下载器=%d 段级下载=%d | 预加载=%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
                      ProbeRead(&gCntShouldWait),
                      ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed),
-                     ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask));
+                     ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask),
+                     ProbeRead(&gCntPreloadCall));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
