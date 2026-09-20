@@ -1,24 +1,24 @@
-feat(probe): 官方客户端注入探针 + 自研注入器（阶段 1）
+fix(ci): 修 workflow YAML 解析失败 + 改用原始 entitlements
 
-侦察（实测，非推测）：
-- 脱壳 IPA 9.12.0：arm64 瘦切片、cryptid=0、97 个依赖全为系统库
-- ATS NSAllowsArbitraryLoads=true（明文 HTTP 可用）
-- UIFileSharingEnabled=true → 日志可从「文件」App 直接取
-- 视频链路：App 自己实现 AVAssetResourceLoaderDelegate（BBRResourceLoaderManager 等）
-- 网络栈：NSURLSession + CFNetwork + 静态链接 AFNetworking，无第三方网络库
-- App 自带 PCDN/MCDN（mcdn.bilivideo.cn、P2PCDNConnectionV2/V3、竞速多连接）
-  → 目标因此修正为「去掉 PCDN + 直连优选节点 + 自并发」，而非「从零加并发」
+问题：GitHub 把 workflow name 显示成文件路径、workflow_dispatch 未注册、
+push 触发的 run 0 秒即失败 —— 说明 workflow 根本没编译成功。
 
-注入器：
-- 实测 load command 区有 131,328 字节空隙，新增 LC_LOAD_DYLIB 仅需 72 字节
-- 故采用原地扩展：不搬动 __TEXT、不重定位指针、不改 vmaddr/fileoff、文件长度不变
-- 空隙不足时直接报错退出，绝不硬来
-- 本地自测：合成无空隙用例拒绝、合成有空隙用例通过、真实二进制结构校验通过
+根因（本地用 PyYAML 定位到行号）：
+  块标量 run: | 里嵌的 bash heredoc，正文被写在第 0 列，
+  直接终止了 YAML 块标量；而结束标记 EOF 却是缩进的，两头都不对。
+  第一次在 dist/README.txt（第 103 行），第二次在 ent.plist（第 166 行）。
 
-探针 BiliProbe.m：
-- 只挂 AVAssetResourceLoader 观测点 + 运行时类枚举，不碰 NSURLSession/NSURLProtocol 热路径
-- 刻意不 hook AVURLAsset init（initializer 交换无法同时避免递归与破坏构造）
-- 显式声明唯一的行为改动：shouldWaitForLoading 恒返回 NO，并据此限制结论适用范围
+修复：
+  * README 输出改写为花括号分组 + 逐行 echo，不再用 heredoc
+  * entitlements 不再硬编码最小集合，改为
+    `codesign -d --entitlements :- <主二进制>` 从原 App Store 签名里抽原始值，
+    抽不到才回退最小集合。比硬编码更正确：能保留 B站原本申请的权限。
 
-CI：macos-26 runner 编译 dylib（Theos，arm64/iOS14.0/不依赖 Theos 运行时），
-可选注入重签出 IPA；同时产出全能签插件包。
+附带：
+  * 显式写 "on":（避免 YAML 把 on 解析成布尔 true 的歧义）
+  * 新增 _recon/validate_workflow.py 作为推送前本地校验闸门
+    （检查 secrets 出现在 if、空 run、heredoc 平衡、artifact 静默失败）
+  * push 触发时忽略 _recon/**，避免侦察脚本改动就触发 macOS 构建
+
+验证：本地 PyYAML 解析通过，11 个步骤全部识别，无 secrets-in-if、
+无未闭合 heredoc、所有 upload-artifact 均设 if-no-files-found=error。

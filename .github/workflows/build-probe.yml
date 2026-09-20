@@ -6,17 +6,17 @@
 # 两种产出：
 #   1) artifact `BiliProbe-dylib`  → 只有 dylib，用「全能签 → 插件注入」装（推荐，不改 IPA）
 #   2) artifact `BiliBili-injected-ipa` → 已注入 dylib 的 IPA，直接签名安装（备用）
-#      需要 secret BILI_IPA_URL 指向脱壳 IPA 的直链；没有就跳过，只出 dylib
+#      需要传 ipa_url 或配 secret BILI_IPA_URL 指向脱壳 IPA 直链；没有就跳过，只出 dylib
 #
 # 重要：注入版与插件注入版**二选一**，不要同时用 —— 否则 dylib 会加载两次。
 
 name: Build BiliProbe
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: '脱壳 IPA 直链（留空则用 secret BILI_IPA_URL；都没有就只出 dylib）'
+        description: '脱壳 IPA 直链（留空则读 secret BILI_IPA_URL；都没有就只出 dylib）'
         required: false
         type: string
       make_release:
@@ -25,11 +25,11 @@ on:
         default: true
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**']
+    paths-ignore: ['**.md', 'docs/**', '_recon/**']
 
 jobs:
   build:
-    name: Build dylib (+ optional injected IPA)
+    name: Build dylib
     runs-on: macos-26
     timeout-minutes: 60
 
@@ -37,26 +37,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      #---------------------------------------------------------------
       - name: Setup Theos
         run: |
           set -euxo pipefail
           export THEOS="$RUNNER_TEMP/theos"
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
           mkdir -p "$THEOS/sdks"
-
-          # 优先用 theos/sdks 的预打包 SDK；失败则回退到 runner 自带 Xcode 的 SDK
-          # （macos-26 镜像自带 Xcode，SDK 一定在，回退路径是兜底）
           if curl -fsSL --retry 2 -o "$RUNNER_TEMP/sdk.tar.xz" \
                https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz; then
             tar -xJf "$RUNNER_TEMP/sdk.tar.xz" -C "$THEOS/sdks"
-            echo "✓ 使用 theos/sdks 预打包 SDK"
+            echo "theos/sdks 预打包 SDK 就绪"
           else
             SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
             SDKVER=$(xcrun --sdk iphoneos --show-sdk-version)
-            echo "回退：Xcode SDK $SDKPATH (version $SDKVER)"
+            echo "回退到 Xcode SDK $SDKPATH (version $SDKVER)"
             ln -sfn "$SDKPATH" "$THEOS/sdks/iPhoneOS${SDKVER}.sdk"
-            ls -la "$THEOS/sdks/"
           fi
           ls -la "$THEOS/sdks/"
 
@@ -71,156 +66,151 @@ jobs:
           echo "--- 产物 ---"
           find . -name '*.dylib' -exec ls -la {} \;
 
-      - name: Verify dylib (架构 / 依赖 / 安装名 / iOS 最低版本)
+      - name: Verify dylib
         run: |
           set -euxo pipefail
           DYLIB=$(find inject/probe -name 'BiliProbe.dylib' | head -1)
-          [ -n "$DYLIB" ] || { echo "✗ 没找到 BiliProbe.dylib"; exit 1; }
+          if [ -z "$DYLIB" ]; then echo "没找到 BiliProbe.dylib"; exit 1; fi
           echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
           echo "=== file ==="
           file "$DYLIB"
           echo "=== lipo ==="
           lipo -info "$DYLIB"
-          echo "=== 依赖（应全部是 /System/Library 或 /usr/lib）==="
+          echo "=== 依赖（应全部为系统库）==="
           otool -L "$DYLIB"
-          echo "=== 安装名 / 平台 ==="
+          echo "=== 平台 / 安装名 ==="
           otool -l "$DYLIB" | grep -A5 -E 'LC_ID_DYLIB|LC_BUILD_VERSION' || true
-          echo "=== 导出符号数 ==="
-          nm -gU "$DYLIB" 2>/dev/null | wc -l || true
-          # 硬性检查：架构必须含 arm64，且不能依赖非系统库
-          lipo -info "$DYLIB" | grep -q arm64 || { echo "✗ 不含 arm64"; exit 1; }
+          lipo -info "$DYLIB" | grep -q arm64 || { echo "不含 arm64"; exit 1; }
           if otool -L "$DYLIB" | tail -n +2 | grep -v -E '/System/Library/|/usr/lib/|@executable_path|@rpath'; then
-            echo "✗ 存在非系统依赖，注入后可能加载失败"; exit 1
+            echo "存在非系统依赖，注入后可能加载失败"; exit 1
           fi
-          echo "✓ dylib 校验通过"
+          echo "dylib 校验通过"
 
-      - name: Package for 全能签 (plugin injection)
+      - name: Package for signing tools
         run: |
           set -euxo pipefail
           mkdir -p dist/Frameworks
           cp "$DYLIB" dist/Frameworks/BiliProbe.dylib
-          cat > dist/README.txt <<'EOF'
-BiliProbe.dylib —— 哔哩哔哩官方客户端注入探针（阶段 1）
+          {
+            echo "BiliProbe.dylib —— 哔哩哔哩官方客户端注入探针（阶段 1）"
+            echo ""
+            echo "安装方式（二选一，不要同时用）："
+            echo ""
+            echo "【方式 A · 推荐】全能签 插件注入"
+            echo "  1. 把 Frameworks/BiliProbe.dylib 导入全能签的插件列表"
+            echo "  2. 对该 IPA 启用插件注入，选中 BiliProbe.dylib"
+            echo "  3. 用你自己的证书签名并安装"
+            echo "  这样不改 IPA 本体，由工具追加 LC_LOAD_DYLIB。"
+            echo ""
+            echo "【方式 B】直接用 CI 产出的注入版 IPA"
+            echo "  下载 artifact BiliBili-injected-ipa，直接签名安装。"
+            echo "  注意：方式 B 的包已带 LC_LOAD_DYLIB，再叠加方式 A 会加载两次。"
+            echo ""
+            echo "装好后："
+            echo "  打开 App -> 随便播一个视频 -> 等 10 秒"
+            echo "  文件 App -> 我的 iPhone -> 哔哩哔哩 -> biliprobe/"
+            echo "    trace.log                 主日志"
+            echo "    environment.txt           注入自检（系统/越狱痕迹/加载镜像）"
+            echo "    cdn-selectors.txt         CDN 选择点落在哪个类"
+            echo "    resloader-delegates.txt   资源加载 delegate 实现者"
+            echo "    classes.txt               运行时类侦察（定向 class-dump）"
+            echo ""
+            echo "把整个 biliprobe 目录打包发回来即可。"
+          } > dist/README.txt
+          cat dist/README.txt
 
-安装方式（二选一，不要同时用）：
-
-【方式 A · 推荐】全能签 → 插件注入
-  1. 把 Frameworks/BiliProbe.dylib 放进手机（或用全能签的「导入插件」）
-  2. 全能签里对该 IPA 启用插件注入，选择 BiliProbe.dylib
-  3. 用你自己的证书签名安装
-  这样不修改 IPA 本体，工具会自动追加 LC_LOAD_DYLIB。
-
-【方式 B】直接用 CI 产出的注入版 IPA
-  下载 artifact BiliBili-injected-ipa，直接签名安装。
-  注意：方式 B 的包里已经带好 LC_LOAD_DYLIB，若再叠加方式 A 会加载两次。
-
-装好后：
-  打开 App → 随便播一个视频 → 等 10 秒
-  「文件」App → 我的 iPhone → 哔哩哔哩 → biliprobe/
-     trace.log             主日志
-     environment.txt       注入自检（系统/越狱痕迹/加载镜像）
-     cdn-selectors.txt     CDN 选择点落在哪个类
-     resloader-delegates.txt  资源加载 delegate 实现者
-     classes.txt           运行时类侦察（定向 class-dump）
-
-把整个 biliprobe 目录打包发回来即可。
-EOF
-
-      #---------------------------------------------------------------
-      - name: 下载脱壳 IPA（可选）
+      - name: Download decrypted IPA (optional)
         id: getipa
         if: ${{ github.event_name == 'push' || inputs.ipa_url != '' }}
         env:
-          # 注意：secrets 不能出现在 if: 里（工作流校验会直接失败），
-          # 所以这里放到 env 中做兜底
           IPA_URL: ${{ inputs.ipa_url || secrets.BILI_IPA_URL }}
         run: |
           set -euxo pipefail
           if [ -z "${IPA_URL:-}" ]; then
-            echo "没有提供 IPA 直链，跳过注入步骤（只出 dylib）"
+            echo "未提供 IPA 直链，跳过注入步骤（只出 dylib）"
             echo "have_ipa=no" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           curl -fL --retry 3 -o "$RUNNER_TEMP/app.ipa" "$IPA_URL"
           ls -la "$RUNNER_TEMP/app.ipa"
           unzip -l "$RUNNER_TEMP/app.ipa" | grep -q 'Payload/.*\.app/$' \
-            || { echo "✗ 下载物不是有效 IPA"; exit 1; }
+            || { echo "下载物不是有效 IPA"; exit 1; }
           echo "have_ipa=yes" >> "$GITHUB_OUTPUT"
 
-      - name: 注入 dylib 并重签为未签名 IPA
+      - name: Inject dylib and re-sign
         if: steps.getipa.outputs.have_ipa == 'yes'
         run: |
           set -euxo pipefail
-          # 1) 抽出 app
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml || true
+
           rm -rf work && mkdir work && cd work
           unzip -q "$RUNNER_TEMP/app.ipa"
           APP=$(ls -d Payload/*.app | head -1)
           APPNAME=$(basename "$APP" .app)
-          echo "APP=$APP  APPNAME=$APPNAME"
+          echo "APP=$APP APPNAME=$APPNAME"
 
-          # 2) 放进 Frameworks
           mkdir -p "$APP/Frameworks"
           cp "$GITHUB_WORKSPACE/$DYLIB" "$APP/Frameworks/BiliProbe.dylib"
 
-          # 3) 用自研注入器追加 LC_LOAD_DYLIB
-          #    已实测该二进制的 load command 区有 131,328 字节空隙，
-          #    新增 72 字节完全在原地完成，不搬动 __TEXT。
-          python3 "$GITHUB_WORKSPACE/inject/inject_dylib.py" \
+          cd "$GITHUB_WORKSPACE"
+          python3 inject/inject_dylib.py \
             --ipa "$RUNNER_TEMP/app.ipa" \
             --out "$RUNNER_TEMP/app.injected.ipa" \
             --executable "Payload/$APPNAME/$APPNAME"
 
-          # 注入器产出的 IPA 重新解出来做签名
           rm -rf work2 && mkdir work2 && cd work2
           unzip -q "$RUNNER_TEMP/app.injected.ipa"
           APP2=$(ls -d Payload/*.app | head -1)
 
-          # 4) 生成 entitlements
-          #    脱壳包不含 embedded.mobileprovision，无法还原原始 entitlements。
-          #    自签场景下用最小集合即可；全能签自己签名时会替换成你证书对应的值。
-          cat > "$RUNNER_TEMP/ent.plist" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>get-task-allow</key>
-  <false/>
-</dict>
-</plist>
-EOF
-          plutil -lint "$RUNNER_TEMP/ent.plist"
+          # 4) entitlements：脱壳包不含 embedded.mobileprovision，但主二进制里
+          #    通常还留着原 App Store 的代码签名，可直接把它内嵌的 entitlements 抽出来。
+          #    抽不到就用最小集合兜底（自签场景够用；全能签签名时会替换）。
+          ENT="$RUNNER_TEMP/ent.plist"
+          BIN2="$APP2/$(basename "$APP2" .app)"
+          if codesign -d --entitlements :- "$BIN2" > "$ENT" 2>/dev/null \
+               && [ -s "$ENT" ] && plutil -lint "$ENT" >/dev/null 2>&1; then
+            echo "已从原二进制抽出 entitlements："
+            plutil -p "$ENT"
+          else
+            echo "未抽到 entitlements，使用最小兜底集合"
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+              '<plist version="1.0">' \
+              '<dict>' \
+              '  <key>get-task-allow</key>' \
+              '  <false/>' \
+              '</dict>' \
+              '</plist>' > "$ENT"
+            plutil -lint "$ENT"
+          fi
 
-          # 5) 重签：先深后浅。App Store 原包是 DRM 签名过的，
-          #    注入后必须整包重签，否则装载器会拒绝。
           find "$APP2" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.appex' \) -print0 \
             | xargs -0 -I{} codesign -f -s - --timestamp=none {} || true
-          codesign -f -s - --timestamp=none --entitlements "$RUNNER_TEMP/ent.plist" "$APP2"
           codesign -f -s - --timestamp=none "$APP2/Frameworks/BiliProbe.dylib"
-          # 上面 dylib 重签会动到 app 的签名密封，app 再签一次收口
-          codesign -f -s - --timestamp=none --entitlements "$RUNNER_TEMP/ent.plist" "$APP2"
+          codesign -f -s - --timestamp=none --entitlements "$ENT" "$APP2"
 
           echo "=== 签名校验 ==="
           codesign -dv --verbose=4 "$APP2" 2>&1 | head -20 || true
           codesign -dv "$APP2/Frameworks/BiliProbe.dylib" 2>&1 | head -10 || true
 
-          # 6) 打包（ditto 是全能签唯一稳定认的打包方式）
-          cd ..
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p dist
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
-            "$APP2" "$GITHUB_WORKSPACE/dist/BiliBili-9.12.0-BiliProbe-unsigned.ipa"
-          ls -la "$GITHUB_WORKSPACE/dist/"
+            "work2/$APP2" "dist/BiliBili-9.12.0-BiliProbe-unsigned.ipa"
+          ls -la dist/
 
-      #---------------------------------------------------------------
-      - name: Upload dylib artifact
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: BiliProbe-dylib
           path: dist/Frameworks/BiliProbe.dylib
           if-no-files-found: error
 
-      - name: Upload 全能签 插件包
+      - name: Upload plugin package
         uses: actions/upload-artifact@v4
         with:
-          name: BiliProbe-for-QuanNengQian
+          name: BiliProbe-plugin-package
           path: dist/
           if-no-files-found: error
 
@@ -233,7 +223,7 @@ EOF
           if-no-files-found: error
           retention-days: 7
 
-      - name: Release (dylib only)
+      - name: Release dylib only
         if: ${{ github.event_name == 'push' || inputs.make_release }}
         uses: softprops/action-gh-release@v2
         with:
@@ -244,5 +234,5 @@ EOF
           body: |
             哔哩哔哩官方客户端注入探针（阶段 1）。
 
-            只包含 dylib —— **不含任何哔哩哔哩官方客户端二进制**。
-            用法见 artifact `BiliProbe-for-QuenNengQian` 里的 README.txt。
+            只包含 dylib —— 不含任何哔哩哔哩官方客户端二进制。
+            用法见 artifact `BiliProbe-plugin-package` 里的 README.txt。
