@@ -441,6 +441,66 @@ static id ProbeRequestInitWithURL(id self, SEL _cmd, NSURL *URL) {
     return nil;
 }
 
+//=== 3b. BBRMediaDownloader：视频字节的实际下载器 ==============================
+// 为什么钩它（依据来自 classes.txt 的真实方法表，不是猜的）：
+//   BBRResourceLoaderManager  + assetURLWithURL:
+//                             - resourceLoader:shouldWaitForLoadingOfRequestedResource:
+//   BBRResourceLoader         - initWithURL: / startWorkerWithRequest:
+//                             - mediaDownloader
+//   BBRMediaDownloader        - initWithURL:cacheWorker:
+//                             - downloadTaskFromOffset:length:toEnd:   ← 段级下载入口
+//   BGMFragmentP2pDownloader2 - startWithCdnFetchHandle:               ← P2P 分支
+// 这一层比 AVAssetResourceLoader 更靠近字节：无论上层用不用自定义 scheme，
+// 只要走这个下载器，URL 与 Range 就在这里。若它也一直为 0，
+// 就能断定竖屏播放器走的是 P2P 分支（BGMFragmentP2pDownloader2）。
+
+static _Atomic(int32_t) gCntMediaDownloaderInit  = 0;
+static _Atomic(int32_t) gCntMediaDownloadTask    = 0;
+
+static IMP gOrigDLInitURL = NULL;
+static IMP gOrigDLTask    = NULL;
+
+/// URL 太长会刷屏，这里只记 host + 路径尾段 + 参数键（不记 token 值）
+static NSString *ProbeSummarizeURL(NSURL *url) {
+    if (!url) return @"(nil)";
+    NSString *path = url.path ?: @"";
+    NSString *tail = path.length > 60 ? [path substringFromIndex:path.length - 60] : path;
+    NSArray<NSString *> *keys = nil;
+    if (url.query.length) {
+        NSMutableArray *ks = [NSMutableArray array];
+        for (NSString *pair in [url.query componentsSeparatedByString:@"&"]) {
+            NSString *k = [pair componentsSeparatedByString:@"="].firstObject;
+            if (k.length) [ks addObject:k];
+        }
+        keys = ks;
+    }
+    return [NSString stringWithFormat:@"host=%@ pathTail=…%@ 参数键=[%@]",
+            url.host ?: @"?", tail,
+            keys.count ? [keys componentsJoinedByString:@","] : @"无"];
+}
+
+static id ProbeDLInitWithURL(id self, SEL _cmd, NSURL *url, id cacheWorker) {
+    ProbeBump(&gCntMediaDownloaderInit);
+    PLog(@"mediadl", @"BBRMediaDownloader initWithURL → %@", ProbeSummarizeURL(url));
+    if (gOrigDLInitURL) {
+        return ((id (*)(id, SEL, id, id))gOrigDLInitURL)(self, _cmd, url, cacheWorker);
+    }
+    return nil;
+}
+
+static void ProbeDLTaskFromOffset(id self, SEL _cmd,
+                                  unsigned long long offset,
+                                  unsigned long long length,
+                                  BOOL toEnd) {
+    ProbeBump(&gCntMediaDownloadTask);
+    PLog(@"mediadl", @"★ downloadTaskFromOffset=%llu length=%llu toEnd=%d  ← 段级下载（多 CDN 并发的落点）",
+         offset, length, (int)toEnd);
+    if (gOrigDLTask) {
+        ((void (*)(id, SEL, unsigned long long, unsigned long long, BOOL))gOrigDLTask)
+            (self, _cmd, offset, length, toEnd);
+    }
+}
+
 //=== 3. AVURLAsset ============================================================
 // 刻意「不」hook AVURLAsset 的 initWithURL:options:。
 // 原因：它是 initializer，交换实现后原实现会被挪到 probe 选择子上，
@@ -637,31 +697,30 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t cancels     = ProbeRead(&gCntDidCancel);
     int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
     int32_t reqBuilt    = ProbeRead(&gCntRequestConstructed);
+    int32_t dlInit      = ProbeRead(&gCntMediaDownloaderInit);
+    int32_t dlTask      = ProbeRead(&gCntMediaDownloadTask);
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
-    PLog(@"verdict", @"计数：已挂委托类=%d setDelegate=%d shouldWait=%d renewal=%d "
-                     @"authChallenge=%d cancel=%d | NSURLSession媒体请求=%d "
-                     @"NSURLRequest媒体构造=%d",
-         hookClasses, setDel, waits, renewals, auths, cancels, sessMedia, reqBuilt);
+    PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
+                     @"NSURLRequest=%d | BBRMediaDownloader=%d 段级下载=%d",
+         hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask);
 
-    if (hookClasses > 0 && waits > 0) {
-        PLog(@"verdict", @"✅ 视频数据经 AVAssetResourceLoaderDelegate —— "
-                         @"阶段 2/3 可在该委托上接管（真实 URL 见 [resloader] 行）");
+    if (dlTask > 0) {
+        PLog(@"verdict", @"OK 已抓到视频段级下载（downloadTaskFromOffset:length:toEnd: %d 次）"
+                         @"→ 阶段 2/3 落点确定：在 BBRMediaDownloader 上改 host"
+                         @"（多 CDN 池）+ 段级并发展开", dlTask);
+    } else if (dlInit > 0) {
+        PLog(@"verdict", @"警告 BBRMediaDownloader 已创建 %d 次但未到段级下载 —— "
+                         @"可能命中缓存，或被 P2P 分支接走。看 [mediadl] 行的 URL", dlInit);
+    } else if (hookClasses > 0 && waits > 0) {
+        PLog(@"verdict", @"OK 视频数据经 AVAssetResourceLoaderDelegate（shouldWait=%d）", waits);
     } else if (reqBuilt > 0 || sessMedia > 0) {
-        PLog(@"verdict", @"⚠️ 媒体 URL 确实出现过（NSURLRequest 构造=%d / "
-                         @"NSURLSession=%d），但 AVAssetResourceLoader 未被使用"
-                         @"（setDelegate=%d 次）。"
-                         @"→ 阶段 2 应改在这些点做重定向，而不是接资源加载委托。"
-                         @"请把 trace.log 里 [request] / [session] 行发回，我据此定新 hook 点",
-             reqBuilt, sessMedia, setDel);
-    } else if (setDel > 0) {
-        PLog(@"verdict", @"⚠️ setDelegate:queue: 被调用 %d 次，但委托类钩子没挂上 —— "
-                         @"探针自身缺陷，请回报本文件", setDel);
+        PLog(@"verdict", @"警告 只有普通 HTTP 请求（NSURLRequest=%d / NSURLSession=%d），"
+                         @"没有任何视频下载器活动 → 视频很可能走 P2P 分支，或取日志时还没开始播",
+             reqBuilt, sessMedia);
     } else {
-        PLog(@"verdict", @"❌ 三个观测点（AVAssetResourceLoader / NSURLSession / "
-                         @"NSURLRequest）**全部为零**。若你确实播放了视频，"
-                         @"说明媒体请求不经过任何 NSURL 系 API（自研 socket 栈），"
-                         @"需要换注入思路；若没播放，请播放后重取日志");
+        PLog(@"verdict", @"未命中 全部观测点为零（含视频下载器）。若确实在播放视频，"
+                         @"说明取日志时视频尚未开始 —— 请先播放、再取日志");
     }
     PLog(@"verdict", @"=======================================");
 }
@@ -891,6 +950,24 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
             PLog(@"hook", @"✗ NSURLRequest 不在运行时（异常）");
         }
 
+        // ②c 视频字节的实际下载器（依据 classes.txt 的真实方法表）
+        Class dlCls = NSClassFromString(@"BBRMediaDownloader");
+        if (dlCls) {
+            gOrigDLInitURL = ProbeReplaceMethod(dlCls, @selector(initWithURL:cacheWorker:),
+                                                (IMP)ProbeDLInitWithURL, "@@:@@@");
+            gOrigDLTask = ProbeReplaceMethod(dlCls, @selector(downloadTaskFromOffset:length:toEnd:),
+                                             (IMP)ProbeDLTaskFromOffset, "v@:QQB");
+        } else {
+            PLog(@"hook", @"✗ BBRMediaDownloader 不在运行时（可能尚未初始化）");
+        }
+        // P2P 分支：若视频走 P2P，则上面那个下载器不会触发
+        Class p2pCls = NSClassFromString(@"BGMFragmentP2pDownloader2");
+        if (p2pCls) {
+            PLog(@"hook", @"· BGMFragmentP2pDownloader2 存在（P2P 分支可用，若 mediadl 计数为 0 则视频走它）");
+        } else {
+            PLog(@"hook", @"· BGMFragmentP2pDownloader2 不在运行时");
+        }
+
         // ③ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
@@ -925,14 +1002,14 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                                                                block:^(NSTimer *t) {
             @autoreleasepool {
                 beats++;
-                PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 已挂委托类=%d "
-                              @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d "
-                              @"| NSURLSession=%d NSURLRequest=%d",
+                PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 委托类=%d setDelegate=%d "
+                              @"shouldWait=%d | NSURLSession=%d NSURLRequest=%d | "
+                              @"下载器init=%d 段级下载=%d",
                      beats, beats * 15,
                      ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
-                     ProbeRead(&gCntShouldWait), ProbeRead(&gCntRenewal),
-                     ProbeRead(&gCntAuthChallenge), ProbeRead(&gCntDidCancel),
-                     ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed));
+                     ProbeRead(&gCntShouldWait),
+                     ProbeRead(&gCntSessionMediaReq), ProbeRead(&gCntRequestConstructed),
+                     ProbeRead(&gCntMediaDownloaderInit), ProbeRead(&gCntMediaDownloadTask));
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);

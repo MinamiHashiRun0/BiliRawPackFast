@@ -1,0 +1,29 @@
+# 定向选择子定位（CDN / 注入点候选）
+
+## BGMMasterListProcessor
+    - _setCdnFirst:    v24@0:8@16
+
+## BGMFragmentDownloader
+    - _downloadCDNDataWithFragment:    v24@0:8@16
+
+## BGMFragmentContext
+    - _startCDNDownloadWithPlayItem:    v24@0:8@16
+    - _sendCDNRequestWithFragment:    v24@0:8@16
+
+## BBLivePlayerP2PServerItem
+    + hitNewBackupExperiment
+
+## BBLivePlayerResolverHelper
+    + hitNewBackupExperiment
+
+## BBUperUploadNetworkTool
+    - checkBestUposHost:    v24@0:8@?16
+    + checkBestUposHostIfNeed
+
+## BFCBandwidthManager
+    - bfcURLProtocolInjectorTransferRequest:    @24@0:8@16
+    - bfcURLProtocolInjectorTransferRequest:response:    @32@0:8@16@24
+
+## BBLiveBCQualityComponent
+    - _requestCDNNode    v16@0:8
+    - _requestCDNNodeV2    v16@0:8
