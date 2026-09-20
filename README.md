@@ -11,17 +11,56 @@
 
 ## 当前状态
 
-**阶段 1：注入探针（进行中）** —— 验证注入可行性 + 抓取真实链路，尚未实现任何功能。
+**阶段 1：注入探针** —— 探针已构建并交付，等真机验证。尚未实现任何 CDN/并发功能。
 
-| 里程碑 | 状态 |
-|---|---|
-| ① 情报侦察（Mach-O / 依赖 / 播放链路 / CDN 逻辑） | ✅ 完成 |
-| ② 注入器（原地扩展 LC_LOAD_DYLIB） | ✅ 完成并本地自测通过 |
-| ③ 探针 dylib 源码 | ✅ 完成（待 CI 编译） |
-| ④ CI 编译 + 可选注入重签 | ✅ 已就绪（待触发） |
-| ⑤ 真机验证注入是否加载 | ⏳ 待用户执行 |
-| ⑥ CDN 重定向 | ⏳ 未开始 |
-| ⑦ 并发分段下载 | ⏳ 未开始 |
+| 里程碑 | 状态 | 证据 |
+|---|---|---|
+| ① 情报侦察（Mach-O / 依赖 / 播放链路 / CDN 逻辑） | ✅ 完成 | `_recon/*.json`、本文档 |
+| ② 注入器（原地扩展 LC_LOAD_DYLIB） | ✅ 完成 | `_recon/test_inject.py` 三项自测通过 |
+| ③ 探针 dylib 源码 | ✅ 完成 | `inject/probe/BiliProbe.m` |
+| ④ CI 编译 + 发布 | ✅ 完成 | run 35523168173 全绿，release `probe-4` |
+| ⑤ 产物独立复核 | ✅ 完成 | `_recon/verify_dylib.py` 全项通过 |
+| ⑥ **真机验证注入是否加载** | ⏳ **等用户执行** | 见下方「真机步骤」 |
+| ⑦ CDN 重定向 | ⏳ 未开始 | |
+| ⑧ 并发分段下载 | ⏳ 未开始 | |
+
+### 已交付产物
+
+`BiliProbe.dylib`，114,688 字节，SHA256
+`16A64214F6130A82F0387717930079CD31693C28B10BA98F3B61E7B9B8ED747F`
+
+```
+Mach-O 64-bit dynamically linked shared library arm64
+install name : @executable_path/Frameworks/BiliProbe.dylib
+部署目标     : iOS 14.0.0（与 App 主二进制 minos 一致）
+依赖         : libobjc.A / Foundation / CoreFoundation / UIKit / AVFoundation / libSystem.B
+               —— 6 个全部系统库，零第三方依赖
+签名         : ad-hoc
+```
+
+### 真机步骤
+
+1. 把 `BiliProbe.dylib` 传到手机（文件 / 微信 / 局域网均可）
+2. 全能签 → 插件（或「注入插件」）→ 导入 `BiliProbe.dylib`
+3. 对哔哩哔哩 IPA 启用该插件 → 用你自己的证书签名安装
+4. 打开 App，**随便播一个视频，等 10 秒**
+5. 「文件」App → 我的 iPhone → 哔哩哔哩 → `biliprobe/`
+
+### 需要拿回来的东西（按重要性排序）
+
+| 文件 | 用途 | 是否必须有 |
+|---|---|---|
+| `environment.txt` | 判断注入是否真的加载、有没有踩越狱检测 | **必须** |
+| `trace.log` | 视频 URL 的真实 scheme / host / Range | **必须** |
+| `cdn-selectors.txt` | CDN 选择点落在哪个类（决定重定向怎么写） | 重要 |
+| `resloader-delegates.txt` | 资源加载 delegate 的实现者清单 | 重要 |
+| `classes.txt` | 定向 class-dump，用于定后续 hook 点 | 有更好 |
+
+另外请回答三个问题：
+1. App 能正常启动吗？还是一启动就闪退？
+2. **视频能正常播放吗？**（探针改了 delegate 的返回值，理论上不影响，
+   但如果黑屏/转圈，这条信息同样关键）
+3. 有没有弹窗报错或异常提示？
 
 ---
 
