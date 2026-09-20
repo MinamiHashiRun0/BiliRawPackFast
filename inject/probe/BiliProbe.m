@@ -730,13 +730,12 @@ static void ProbeEmitVerdict(NSString *phase) {
     int32_t hookClasses = ProbeRead(&gCntDelegateClassHooked);
     int32_t setDel      = ProbeRead(&gCntSetDelegate);
     int32_t waits       = ProbeRead(&gCntShouldWait);
-    int32_t renewals    = ProbeRead(&gCntRenewal);
-    int32_t auths       = ProbeRead(&gCntAuthChallenge);
-    int32_t cancels     = ProbeRead(&gCntDidCancel);
     int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
     int32_t reqBuilt    = ProbeRead(&gCntRequestConstructed);
     int32_t dlInit      = ProbeRead(&gCntMediaDownloaderInit);
     int32_t dlTask      = ProbeRead(&gCntMediaDownloadTask);
+    // 注：renewal / authChallenge / cancel 三个计数仍在采集（心跳里用得上），
+    // 但结论行不再逐个列出 —— 上一版把它们留成了未使用变量，被 -Werror 拦下。
 
     PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
     PLog(@"verdict", @"计数：委托类=%d setDelegate=%d shouldWait=%d | NSURLSession=%d "
