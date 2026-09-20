@@ -59,6 +59,57 @@ jobs:
           ls -la "$GITHUB_WORKSPACE/_recon/sidx_fixtures/"
           /tmp/test_sidx_core "$GITHUB_WORKSPACE/_recon/sidx_fixtures"
 
+  # ---------------------------------------------------------------- ObjC 引擎运行测试
+  # BSSegmentFetcher 依赖 Foundation 的 NSURLSession，只能在 macOS 上真跑。
+  # 在此之前它**只通过编译、从未执行过** —— 这是本项目最大的一处"看着绿其实没验"。
+  # 这里起一个按连接限速的 Range 服务器，真正验证并发、按序交付、重试降级。
+  verify-segment-fetcher:
+    name: Run BSSegmentFetcher (macOS, live HTTP)
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start throttled range server
+        run: |
+          set -euxo pipefail
+          python3 "$GITHUB_WORKSPACE/_recon/serve_test_data.py" 18080 "$RUNNER_TEMP/tdata" 8 262144 256 &
+          echo $! > "$RUNNER_TEMP/srv.pid"
+          # 等服务端把夹具写完并开始监听
+          for i in $(seq 1 40); do
+            if curl -fsS -r 0-15 -o /dev/null "http://127.0.0.1:18080/f.m4s"; then
+              echo "服务就绪（第 $i 次尝试）"; break
+            fi
+            sleep 0.5
+          done
+          ls -la "$RUNNER_TEMP/tdata/"
+          # 夹具大小必须与测试期望一致（8 段 × 256KiB）
+          EXPECT=$((8 * 262144))
+          ACTUAL=$(stat -f%z "$RUNNER_TEMP/tdata/f.m4s")
+          echo "夹具大小 $ACTUAL 期望 $EXPECT"
+          [ "$ACTUAL" -eq "$EXPECT" ] || { echo "夹具大小不符"; exit 1; }
+
+      - name: Compile and run fetcher test
+        run: |
+          set -euxo pipefail
+          cd inject/probe
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
+                -isysroot "$SDK" -framework Foundation -framework AVFoundation \
+                -I. -o /tmp/test_segment_fetcher \
+                test_segment_fetcher.m BSSegmentFetcher.m BSSidxIndex.m BSSidxCore.c
+          echo "编译通过"
+          # 测试内部有超时，万一卡住由 job 级 timeout 兜底
+          /tmp/test_segment_fetcher "http://127.0.0.1:18080"
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/srv.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/srv.pid")" 2>/dev/null || true
+          fi
+
   build:
     name: Build dylib
     runs-on: macos-26
