@@ -270,7 +270,8 @@ static IMP gOrigSetRLDelegate = NULL;
 
 static void ProbeSetResourceLoaderDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue) {
     ProbeBump(&gCntSetDelegate);
-    PLog(@"resloader", @"setDelegate:queue: → delegate=%@ queue=%s",
+    PLog(@"resloader", @"setDelegate:queue: → 宿主=%@ delegate=%@ queue=%s",
+         NSStringFromClass([self class]),
          delegate ? NSStringFromClass([delegate class]) : @"(nil)",
          queue ? "有" : "NULL");
 
@@ -592,7 +593,67 @@ static void ProbeFindResourceLoaderDelegates(void) {
     }
 }
 
-//=== 4. 环境 / 反调试自检 =====================================================
+//=== 4. 结论与心跳 ============================================================
+// 教训（真机实测踩到）：第一版用 dispatch_source 定时器，结果**一次都没触发** ——
+// 真机上约两分钟的会话里 [beat] 与 [verdict] 全部为 0。
+// 具体原因无法在无设备条件下确证（可能是 App 进出后台时该队列上的定时器被挂起），
+// 因此这里不再依赖单一机制，改成双保险：
+//   ① 结论：侦察结束时在后台线程**立即**写一次（不依赖定时器）
+//   ② 心跳：用 NSTimer 挂主 runloop 的 common modes 重复触发（iOS 上最常规的写法）
+// 并且结论只写一次，避免重复。
+
+static _Atomic(bool) gVerdictWritten = false;
+
+/// 只负责输出结论文本，不关心是否已写过、也不改状态
+static void ProbeEmitVerdict(NSString *phase) {
+    int32_t hookClasses = ProbeRead(&gCntDelegateClassHooked);
+    int32_t setDel      = ProbeRead(&gCntSetDelegate);
+    int32_t waits       = ProbeRead(&gCntShouldWait);
+    int32_t renewals    = ProbeRead(&gCntRenewal);
+    int32_t auths       = ProbeRead(&gCntAuthChallenge);
+    int32_t cancels     = ProbeRead(&gCntDidCancel);
+    int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
+
+    PLog(@"verdict", @"=========== 结论 [%@] ===========", phase);
+    PLog(@"verdict", @"计数：已挂委托类=%d setDelegate=%d shouldWait=%d renewal=%d "
+                     @"authChallenge=%d cancel=%d NSURLSession媒体请求=%d",
+         hookClasses, setDel, waits, renewals, auths, cancels, sessMedia);
+
+    if (hookClasses > 0 && waits > 0) {
+        PLog(@"verdict", @"✅ 视频数据经 AVAssetResourceLoaderDelegate —— "
+                         @"阶段 2/3 可在该委托上接管（已抓到真实 URL 的话见 [resloader] 行）");
+    } else if (hookClasses > 0) {
+        PLog(@"verdict", @"⚠️ 委托 hook 已挂 %d 个类，但 shouldWait 从未触发："
+                         @"到此刻为止 App 没通过 AVAssetResourceLoader 取过数据。"
+                         @"若已播放视频 → 视频不走这条路，看 [session] 行找新注入点",
+             hookClasses);
+    } else if (setDel > 0) {
+        PLog(@"verdict", @"⚠️ setDelegate:queue: 被调用 %d 次，但委托类钩子没挂上 —— "
+                         @"探针自身缺陷，请回报本文件", setDel);
+    } else {
+        PLog(@"verdict", @"❌ AVAssetResourceLoader 从未被使用（setDelegate 调用 0 次）。"
+                         @"NSURLSession 媒体请求=%d。"
+                         @"若两者都为 0 且你确实播了视频 → 需要换注入思路",
+             sessMedia);
+    }
+    PLog(@"verdict", @"=======================================");
+}
+
+/// phase: "启动即写，仅供参考" / "侦察完成" / "45 秒"
+/// force: 是否无视「只写一次」的限制
+static void ProbeWriteVerdict(NSString *phase, bool force) {
+    if (force) {
+        gVerdictWritten = true;
+        ProbeEmitVerdict(phase);
+        return;
+    }
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&gVerdictWritten, &expected, true)) return;
+    ProbeEmitVerdict(phase);
+}
+
+
+//=== 6. 环境 / 反调试自检 =====================================================
 static void ProbeLogEnvironment(void) {
     @autoreleasepool {
         NSMutableString *s = [NSMutableString string];
@@ -804,6 +865,10 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 ProbeFindCdnSelectors();
                 ProbeDumpClasses();
                 PLog(@"scan", @"运行时侦察完成。日志目录：%@", gLogDir);
+                // 侦察完**强制**写一份结论（覆盖启动时那份）：
+                // 此时类枚举已完成，「已挂委托类」等计数若仍为 0，
+                // 就能确定性地判定视频没有走 AVAssetResourceLoader
+                ProbeWriteVerdict(@"侦察完成", true);
             }
         });
 
@@ -811,60 +876,39 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
 
         // ---- 心跳 + 结论 ----
         // 目的：把「注入失败」「hook 没被调用」「一切正常」三种情况区分开。
-        // 没有这个，用户拿回来的日志若几乎是空的，就无法判断是哪一种，
-        // 整轮真机测试的信息量会归零 —— 而真机测试是最贵的一环。
+        //
+        // 真机实测教训：第一版用 dispatch_source 定时器，在两分钟会话里
+        // **一次都没触发**（[beat]/[verdict] 全为 0），而日志其他部分正常，
+        // 说明不是写盘问题而是定时器没跑。故改为双保险：
+        //   ① 不依赖定时器：启动时、侦察结束时各强制写一份结论
+        //   ② 心跳改 NSTimer 挂主 runloop 的 common modes —— iOS 上最常规的写法
+
         __block int beats = 0;
-        dispatch_source_t timer =
-            dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-        dispatch_source_set_timer(timer,
-                                  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
-                                  (uint64_t)(15 * NSEC_PER_SEC),
-                                  (uint64_t)(2 * NSEC_PER_SEC));
-        dispatch_source_set_event_handler(timer, ^{
+        NSTimer *beatTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
+                                                             repeats:YES
+                                                               block:^(NSTimer *t) {
             @autoreleasepool {
                 beats++;
-                int32_t hookClasses = ProbeRead(&gCntDelegateClassHooked);
-                int32_t setDel      = ProbeRead(&gCntSetDelegate);
-                int32_t waits       = ProbeRead(&gCntShouldWait);
-                int32_t renewals    = ProbeRead(&gCntRenewal);
-                int32_t auths       = ProbeRead(&gCntAuthChallenge);
-                int32_t cancels     = ProbeRead(&gCntDidCancel);
-                int32_t sessMedia   = ProbeRead(&gCntSessionMediaReq);
-
                 PLog(@"beat", @"第 %d 次心跳（约 %d 秒）| 已挂委托类=%d "
                               @"setDelegate=%d shouldWait=%d renewal=%d authChallenge=%d cancel=%d "
                               @"NSURLSession媒体请求=%d",
-                     beats, beats * 15, hookClasses, setDel, waits, renewals, auths, cancels,
-                     sessMedia);
+                     beats, beats * 15,
+                     ProbeRead(&gCntDelegateClassHooked), ProbeRead(&gCntSetDelegate),
+                     ProbeRead(&gCntShouldWait), ProbeRead(&gCntRenewal),
+                     ProbeRead(&gCntAuthChallenge), ProbeRead(&gCntDidCancel),
+                     ProbeRead(&gCntSessionMediaReq));
 
-                // 45 秒做一次结论：这段足够用户播一个视频
-                if (beats == 3) {
-                    if (hookClasses > 0 && waits > 0) {
-                        PLog(@"verdict", @"✅ 结论：注入成功且已捕获资源加载链路 —— "
-                                         @"日志里应有具体 URL/scheme，可以据此定 hook 点");
-                    } else if (hookClasses > 0) {
-                        PLog(@"verdict", @"⚠️ 结论：注入成功、委托 hook 已挂，但 "
-                                         @"shouldWait 一次都没触发。说明 App 取视频数据"
-                                         @"没走 AVAssetResourceLoaderDelegate。"
-                                         @"此时请重点看本文件里 [session] 行 —— "
-                                         @"那是我为这种情况准备的兜底观测点");
-                    } else if (setDel > 0) {
-                        PLog(@"verdict", @"⚠️ 结论：setDelegate:queue: 被调用了，但委托类"
-                                         @"钩子没挂上 —— 探针自身缺陷，请回报此文件");
-                    } else {
-                        PLog(@"verdict", @"❌ 结论：注入的 dylib 已加载（能写这份日志即为证据），"
-                                         @"但 AVAssetResourceLoader 完全没有被使用。"
-                                         @"若你确实播放了视频：NSURLSession媒体请求=%d，"
-                                         @"若该数也 >0 则请看 [session] 行定的新注入点；"
-                                         @"若两者都为 0，说明视频走的既不是资源加载器也不是"
-                                         @"NSURLSession（可能是自研 socket 栈），需要换思路",
-                             sessMedia);
-                    }
-                }
+                // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
+                if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
             }
-        });
-        dispatch_resume(timer);
+        }];
+        // 加进 common modes，避免滚动/拖拽时主 runloop 切模式导致定时器停摆
+        [[NSRunLoop mainRunLoop] addTimer:beatTimer forMode:NSRunLoopCommonModes];
+        PLog(@"boot", @"心跳已启动：每 15 秒一次；侦察结束时与 45 秒后各强制写一份结论");
+
+        // 最后写一份「启动态」结论。放在心跳启动之后，日志顺序读起来才顺。
+        // 这份只是保底（此时必然还没播放），信息量在侦察完成那份与 45 秒那份。
+        ProbeWriteVerdict(@"启动即写（此时尚未播放，仅供参考）", true);
     }
 }
 
