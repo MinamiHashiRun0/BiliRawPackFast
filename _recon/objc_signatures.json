@@ -1,0 +1,127 @@
+{
+  "encoding_count": 26856,
+  "delegate_like_encodings": [
+    "@9*0@9?",
+    "@995@9:",
+    "@9:5@9["
+  ],
+  "by_class": {
+    "BBLivePlayerP2PServer": [
+      "+carrierTypeSupport",
+      "+enableP2PUsageFromConfiguration",
+      "+isValidTime",
+      "+netTypeSupport"
+    ],
+    "BBLivePlayerP2PServerItem": [
+      "+hitNewBackupExperiment",
+      "-_cancelDelayRemoveAsssetLoader",
+      "-_delayRemoveAssetLoader",
+      "-asset:shouldReconnectWithError:connectCount:",
+      "-assetDidComplete:errorType:error:",
+      "-assetDidReceiveTracker:eventId:trackerInfo:rate:",
+      "-assetReadyToResponse:",
+      "-assetReceiveReloadEvent:message:",
+      "-dealloc",
+      "-initWithURLString:key:usingFmp4Stream:httpHeaderFields:",
+      "-removeTask",
+      "-resumeTask",
+      "-stopTask"
+    ],
+    "BBLivePlayerResolverHelper": [
+      "+_processPlayerInfoWithPlayWrapper:stream:format:resolverModel:streamType:disableP2PCreationBlocK:completeBlock:",
+      "+handlePlayInfoWithResolverModel:requestReason:playInfo:currentQuality:disableP2PCreationBlock:error:completeBlock:",
+      "+invalidateMediaPlayerItemIfNeeded:"
+    ],
+    "BBLiveBaseP2PDownloadService": [
+      "-_downloadIfNeeds",
+      "-downloadWithResource:completion:",
+      "-p2pServiceRequestPool:didEnqueue:"
+    ],
+    "BBLiveBaseP2PServiceManager": [
+      "-connectServiceWithPlayURL:error:",
+      "-downloadWithResource:completion:",
+      "-shareWithResource:completion:"
+    ],
+    "BBLiveBaseP2PServiceResourcePool": [
+      "-_dequeue",
+      "-_enqueueObject:"
+    ],
+    "BBLiveBaseP2PUploadService": [
+      "-_uploadIfNeeds",
+      "-p2pServiceRequestPool:didEnqueue:",
+      "-uploadWithResource:completion:"
+    ],
+    "BBLiveMP4CheckTask": [
+      "-_downloadFromP2PWithResource:"
+    ],
+    "BBLivePlayerMediaPlayerItem": [
+      "-logInfo:args:",
+      "-onMeteredNetworkUrlHook:"
+    ],
+    "BBLivePlayerP2PServerLogger": [
+      "-logMessage:logFlag:"
+    ],
+    "BBLivePlayerP2PTracker": [
+      "-_reportWithEnd:",
+      "-stopTrack"
+    ],
+    "BBLiveProcessScheduler": [
+      "-getRoomPlayInfoRoomID:needPlayURL:needShowPIP:dolbyValue:extraParam:willRequestRoomPlayInfo:playInfoSuccess:playInfoFailure:willRequestInfoByRoom:infoByRoomSuccess:infoByRoomFailure:groupCompletion:"
+    ],
+    "BBLiveRoomInfoDataDispatcher": [
+      "-hitNOPlayUrlEnable",
+      "-needPlayURL"
+    ],
+    "BBLiveRoomListViewModel": [
+      "-_didDisplayItemViewModel:"
+    ],
+    "BBLiveShoppingPlayerAdapter": [
+      "-_refreshP2pType"
+    ],
+    "BBOGVPlayerSceneBiz": [
+      "-playItemConfigWithContext:response:"
+    ],
+    "BBPgcPlayerScene": [
+      "-playItem"
+    ],
+    "BBPhoneMPPipDataSource": [
+      "-requestPlayURLWithItem:completeBlock:"
+    ],
+    "BBPlayerCastService": [
+      "-playItem"
+    ],
+    "BBSResourceBundleLoadManager": [
+      "-_prepareResourceLoaderForDraftAudioTrack:",
+      "-_prepareResourceLoaderForDraftVideoTrack:",
+      "-_prepareResourceLoaderMediaList:"
+    ],
+    "BBStudioAblumResourceLoader": [
+      "-loadAlbumResourceWithLocalIdentifier:waitSourceCache:exportCompletion:errorCompletion:"
+    ],
+    "BBUperChapterAIService": [
+      "-_fetchPlayURLForContext:"
+    ],
+    "IJKFFMoviePlayerControllerAVPlayer": [
+      "-removeIjkMediaPlayerItem:",
+      "-replaceIjkMediaPlayerItem:",
+      "-setIjkMediaPlayerItem:"
+    ],
+    "IJKMediaPlayerItem": [
+      "-applyTo:",
+      "-doAssetUpdateAndParse:",
+      "-p2pStreamState",
+      "-parseDash:videoId:audioId:",
+      "-reset",
+      "-resetWithScheme:",
+      "-setPlayerItemPriority:bufferWhenIdle:",
+      "-shutdown",
+      "-shutdownInternal",
+      "-updateAsset:",
+      "-updateMeteredUrl:reasonType:"
+    ],
+    "IJKP2PManager": [
+      "-openSocket:isLive:"
+    ]
+  },
+  "note": "type encoding 与方法名在 ObjC 元数据里分表存放，此处不假装精确配对；delegate_like_encodings 给出候选签名，供写 hook 时选择函数指针类型"
+}

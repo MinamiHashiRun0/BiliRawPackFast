@@ -94,7 +94,33 @@ install name : @executable_path/Frameworks/BiliProbe.dylib
 签名         : ad-hoc
 ```
 
-### 阶段 2 的线索：PCDN 可能是「配置开关」而非硬编码
+### 阶段 2 的 hook 点（从二进制恢复，不依赖真机）
+
+不必等真机日志才动手 —— ObjC 元数据里能恢复出方法名，已挖到这些**具体**候选：
+
+| 类 / 方法 | 为什么是候选 |
+|---|---|
+| `BBLivePlayerResolverHelper`<br>`+ _processPlayerInfoWithPlayWrapper:stream:format:resolverModel:streamType:disableP2PCreationBlocK:completeBlock:` | 解析 playurl 的入口，而且**直接带 `disableP2PCreationBlock` 参数** —— 说明 App 自己有「关掉 P2P 创建」的开关，这是最干净的切入点 |
+| 同上<br>`+ handlePlayInfoWithResolverModel:requestReason:playInfo:currentQuality:disableP2PCreationBlock:error:completeBlock:` | 同上，另一处同款开关 |
+| `BBLivePlayerP2PServerItem`<br>`- initWithURLString:key:usingFmp4Stream:httpHeaderFields:` | P2P 资源项的构造，URL 从这里进入 |
+| 同上<br>`- asset:shouldReconnectWithError:connectCount:` / `- assetReadyToResponse:` | 资源加载生命周期回调 |
+| `BBRResourceLoaderManager` 家族 | 视频字节主通道（`AVAssetResourceLoaderDelegate`） |
+
+配合已挖到的偏好键（`p2p_pcdn_download_enable`、`p2p_v3_policy_enable`、
+`isPCDNBlackList`、`ijkplayer.p2p-disable-whitelist`），所以阶段 2 现在有**两条路**：
+1. **配置路**：若这些键生效，改配置即可关 PCDN，成本最低、动静最小；
+2. **开关路**：hook `disableP2PCreationBlock:` 传 YES，从 resolver 层直接掐掉 P2P 创建。
+
+两条路都还需要真机确认「哪个真的生效」——但**实现方向不再靠猜**。
+
+工具：`_recon/extract_signatures.py`（从 type encoding 恢复签名，
+共 26,856 条疑似编码，按返回类型分布：void 14,855 / 对象 6,495 / BOOL 1,674 …）。
+
+> 已知限制：ObjC 元数据里**方法名与 type encoding 分表存放**，
+> 无法可靠地一一配对，所以本文件只给方法名与候选签名，**不假装已精确配对**。
+> 精确签名仍需真机 dump 或反汇编确认。
+
+#### 偏好键线索（配置路）
 
 在二进制里发现成组的 P2P/MCDN 偏好键，其中几个直接决定 PCDN 是否启用：
 
@@ -108,12 +134,10 @@ install name : @executable_path/Frameworks/BiliProbe.dylib
 | `ijkplayer.p2p_download` / `ijkplayer.p2p_upload` | IJK 层下载/上传开关 |
 | `p2p_close_stun_reflex_ports` / `p2p_local_connect_enable` | NAT/UDP 相关 |
 
-**这意味着阶段 2 可能有一条成本远低于 hook 的路径**：直接改写偏好值即可关掉 PCDN，
-不必替换 delegate、也不碰播放逻辑。探针日志出来后可以两种做法对照：
-若偏好开关生效，就用配置；不生效再退回 delegate 替换。
-
-待探针确认的具体问题：偏好写在哪（NSUserDefaults / 自定义 plist / 服务端下发配置），
-以及 App 是否在启动时用服务端配置覆盖本地值。
+**若这些键生效，关掉 PCDN 只需改配置**，不必替换 delegate、也不碰播放逻辑。
+待确认：偏好写在哪（NSUserDefaults / 自定义 plist / 服务端下发），
+以及启动时是否被服务端配置覆盖。已在 IPA 里找过 `p2p_proxy.json`，**不存在**
+（该文件是运行时生成的），所以配置路能否走通必须靠真机确认。
 
 ### 真机步骤
 
