@@ -74,6 +74,7 @@ static void BSPHookLog(NSString *fmt, ...)
 
 static NSMutableDictionary<NSString *, BSPHookEntry *> *gEntries = nil;   /* key = "Cls|sel" */
 static NSMutableArray<NSString *> *gOrder = nil;
+static NSMutableArray<NSString *> *gDirectOrder = nil;   /* 直连 hook 的记录 */
 static NSLock *gLock = nil;
 static pthread_key_t gDepthKey;
 
@@ -86,6 +87,7 @@ static void bsp_init(void)
     dispatch_once(&once, ^{
         gEntries  = [NSMutableDictionary dictionary];
         gOrder    = [NSMutableArray array];
+        gDirectOrder = [NSMutableArray array];
         gLock     = [[NSLock alloc] init];
         gInheritedForward = [NSMutableDictionary dictionary];
         pthread_key_create(&gDepthKey, NULL);
@@ -366,36 +368,49 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
     key = bsp_key(cls, sel);
     if (gEntries[key]) { [gLock unlock]; return YES; }   /* 已装 */
 
-    /* 类自己实现了 forwardInvocation: -> 拒绝，避免踩掉它的转发逻辑 */
+    /* 类自己实现了 forwardInvocation: -> 拒绝，避免踩掉它的转发逻辑。
+     *
+     * ★ 这里有个曾经把整个包坑惨的细节：装上第一个转发 hook 时，
+     *   我们**自己**会给这个类加一个 forwardInvocation:。于是第二个 hook 走到这里
+     *   时，class_copyMethodList 会查到我们自己加的那个，被误判成「类自带」→
+     *   后续 hook 全部拒绝安装 —— 结果是**每个类只能装上第一个 hook**。
+     *   真机日志里就是这个样子：play ✓ 然后 prepareToPlay/initWithContentURL: 全 ✗，
+     *   22 个 URL hook 只装上 4 个。
+     *   修法：查到 forwardInvocation: 时先看它的实现是不是我们自己的 bsp_forward，
+     *   是则视为「已就绪」而不是「冲突」。 */
     {
         unsigned int cnt = 0;
         Method *list = class_copyMethodList(cls, &cnt);
-        BOOL owns = NO;
+        BOOL owns = NO, ours = NO;
         for (unsigned int i = 0; i < cnt; i++) {
-            if (method_getName(list[i]) == @selector(forwardInvocation:)) { owns = YES; break; }
+            if (method_getName(list[i]) == @selector(forwardInvocation:)) {
+                if (method_getImplementation(list[i]) == (IMP)bsp_forward) ours = YES;
+                else owns = YES;
+                break;
+            }
         }
         free(list);
         if (owns) {
             [gLock unlock];
-            BSPHookLog(@"✗ %@ 自带 forwardInvocation:（会与转发器打架），拒绝 hook %@", className, selectorName);
+            BSPHookLog(@"✗ %@ 自带 forwardInvocation:（会与转发器打架），拒绝 hook %@",
+                       className, selectorName);
             return NO;
         }
-    }
 
-    /* 记录继承来的 forwardInvocation:（一般是 NSObject 的） */
-    {
-        Method fw = class_getInstanceMethod(cls, @selector(forwardInvocation:));
-        if (fw) {
+        /* 本类还没装过转发器：先记下它继承来的那一个（一般是 NSObject 的，
+         * 用于未命中时链式回退），再把我们的装上。 */
+        if (!ours) {
+            Method fw = class_getInstanceMethod(cls, @selector(forwardInvocation:));
             NSString *ck = [NSString stringWithFormat:@"%s", class_getName(cls)];
-            if (!gInheritedForward[ck])
+            if (fw && !gInheritedForward[ck])
                 gInheritedForward[ck] = [NSValue valueWithPointer:(const void *)method_getImplementation(fw)];
-        }
-    }
 
-    if (!class_addMethod(cls, @selector(forwardInvocation:), (IMP)bsp_forward, "v@:@")) {
-        [gLock unlock];
-        BSPHookLog(@"✗ %@ 无法添加 forwardInvocation:，拒绝 hook %@", className, selectorName);
-        return NO;
+            if (!class_addMethod(cls, @selector(forwardInvocation:), (IMP)bsp_forward, "v@:@")) {
+                [gLock unlock];
+                BSPHookLog(@"✗ %@ 无法添加 forwardInvocation:，拒绝 hook %@", className, selectorName);
+                return NO;
+            }
+        }
     }
 
     {
@@ -427,6 +442,66 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
     r = gOrder.copy;
     [gLock unlock];
     return r;
+}
+
++ (NSArray<NSString *> *)installedDirectHooks
+{
+    NSArray *r;
+    bsp_init();
+    [gLock lock];
+    r = gDirectOrder.copy;
+    [gLock unlock];
+    return r;
+}
+
++ (BOOL)hookClass:(NSString *)className
+         selector:(NSString *)selectorName
+     expectShapes:(NSString *)shapes
+        directImp:(IMP)imp
+         storeOld:(IMP *)outOld
+{
+    bsp_init();
+
+    Class cls = NSClassFromString(className);
+    SEL   sel = NSSelectorFromString(selectorName);
+    Method m;
+    const char *enc;
+    char actual[96];
+    IMP old;
+
+    if (!cls) { BSPHookLog(@"· 类 %@ 不在运行时", className); return NO; }
+    if (!imp)  { BSPHookLog(@"✗ %@::%@ 直连实现为空", className, selectorName); return NO; }
+
+    m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        BSPHookLog(@"✗ %@ 上找不到方法 %@（类存在，但没实现这个方法）", className, selectorName);
+        return NO;
+    }
+    enc = method_getTypeEncoding(m);
+    if (!enc) { BSPHookLog(@"✗ %@::%@ 拿不到 type encoding", className, selectorName); return NO; }
+
+    if (shapes) {
+        int n = bsp_enc_shapes(enc, actual, sizeof(actual));
+        if (n < 0) {
+            BSPHookLog(@"✗ %@::%@ enc=%@ 解析失败，拒绝直连安装", className, selectorName, @(enc));
+            return NO;
+        }
+        if (![shapes isEqualToString:@(actual)]) {
+            BSPHookLog(@"✗ %@::%@ 参数形状不符，拒绝直连安装\n"
+                       @"        enc=%@  实际形状=\"%@\"  期望=\"%@\"",
+                       className, selectorName, @(enc), @(actual), shapes);
+            return NO;
+        }
+    }
+
+    old = class_replaceMethod(cls, sel, imp, enc);
+    if (outOld) *outOld = old;
+
+    [gLock lock];
+    [gDirectOrder addObject:[NSString stringWithFormat:@"%@::%@  [%@] -> 直连",
+                             className, selectorName, @(enc)]];
+    [gLock unlock];
+    return YES;
 }
 
 + (NSUInteger)callCountForClass:(NSString *)className selector:(NSString *)selectorName

@@ -1802,6 +1802,161 @@ static void ProbeBumpHookHit(NSString *key) {
     }
 }
 
+//------------------------------------------------------------------------------
+#pragma mark - 直连观测：NSURLSessionTask.resume
+//------------------------------------------------------------------------------
+// 签名 v16@0:8（零参数），所以 void f(id, SEL) 是**严格对应**的，不存在读错
+// 寄存器的问题 —— 这与之前那次「猜签名」的崩溃有本质区别。
+// 用直连而不是转发，是因为 NSURLSessionTask 是系统 class cluster，
+// 转发链会被具体类（__NSCFURLSessionTask）遮住并导致崩溃（真机已复现）。
+static void (*gOrigTaskResume)(id, SEL) = NULL;
+
+static void ProbeTaskResume(id self, SEL _cmd) {
+    @autoreleasepool {
+        NSURLRequest *r = nil;
+        if ([self respondsToSelector:@selector(originalRequest)]) r = [self originalRequest];
+        if ([r isKindOfClass:NSURLRequest.class] && !ProbeIsOurProxyUpstream(r)) {
+            NSString *host = r.URL.host.lowercaseString ?: @"(无host)";
+            ProbeBump(&gCntTaskResume);
+            @synchronized (gTaskHostHist) {
+                gTaskHostHist[host] = @([gTaskHostHist[host] integerValue] + 1);
+            }
+            if (ProbeHostLooksLikeMedia(r.URL)) {
+                PLog(@"session", @"★ 任务 resume 命中媒体 host=%@ method=%@ range=%@\n          URL=%.300@",
+                     host, r.HTTPMethod ?: @"?", [r valueForHTTPHeaderField:@"Range"] ?: @"(无)",
+                     r.URL.absoluteString ?: @"?");
+            }
+        }
+    }
+    if (gOrigTaskResume) gOrigTaskResume(self, _cmd);
+}
+
+/// 改写返回值时的保命池。
+/// NSInvocation **不会** retain 返回值，而 ARC 会在 after 块作用域结束时释放局部
+/// 强引用 —— 那样调用方拿到的是野指针，一用就崩。这里用一个有上限的强引用池
+/// 把对象兜住，直到调用方确实取走。
+static NSMutableArray *gReturnKeepAlive = nil;
+static void ProbeKeepReturnAlive(id obj) {
+    static const NSUInteger kCap = 256;
+    if (!obj) return;
+    if (!gReturnKeepAlive) gReturnKeepAlive = [NSMutableArray array];
+    @synchronized (gReturnKeepAlive) {
+        [gReturnKeepAlive addObject:obj];
+        while (gReturnKeepAlive.count > kCap) [gReturnKeepAlive removeObjectAtIndex:0];
+    }
+}
+
+//------------------------------------------------------------------------------
+#pragma mark - hook 分组开关
+//------------------------------------------------------------------------------
+// {Documents}/biliprobe/hooks.txt，每行 "组名=on|off"（# 开头为注释）。
+// 组名：player（播放器生命周期/正证据）、url（URL 改写）、net（系统网络类）。
+//
+// 为什么要这个：真机一打开就闪退时，唯一能做的就是**二分**。有了这个文件，
+// 你不用等我重新出包，自己把可疑的那组改成 off 再启动一次就能定位。
+//
+// 缺省值：player=on url=on net=off。
+//   net 默认为 off 是有意的 —— 它挂的是 NSURLSessionTask.resume 这种
+//   系统类、启动瞬间就会被大量调用的选择子，是「一打开就崩」的头号嫌疑。
+//   而 player / url 才是我们真正需要的数据，先保证 App 能起来。
+static BOOL ProbeGroupEnabled(NSString *group) {
+    static NSMutableDictionary<NSString *, NSNumber *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                 @YES, @"player", @YES, @"url", @NO, @"net", nil];
+        NSString *path = [[BSPProxyServer logDir] stringByAppendingPathComponent:@"hooks.txt"];
+        NSString *text = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding error:NULL];
+        if (text.length) {
+            for (NSString *raw in [text componentsSeparatedByCharactersInSet:
+                                   [NSCharacterSet newlineCharacterSet]]) {
+                NSString *line = [raw stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceCharacterSet]];
+                NSRange eq;
+                if (!line.length || [line hasPrefix:@"#"]) continue;
+                eq = [line rangeOfString:@"="];
+                if (eq.location == NSNotFound) continue;
+                {
+                    NSString *k = [[line substringToIndex:eq.location] lowercaseString];
+                    NSString *v = [[line substringFromIndex:NSMaxRange(eq)] lowercaseString];
+                    cache[k] = @([v hasPrefix:@"on"] || [v hasPrefix:@"1"] || [v hasPrefix:@"yes"]);
+                }
+            }
+        }
+    });
+    NSNumber *n = cache[group];
+    return n ? n.boolValue : YES;
+}
+
+static NSString *ProbeGroupsDescription(void) {
+    return [NSString stringWithFormat:@"player=%@ url=%@ net=%@",
+            ProbeGroupEnabled(@"player") ? @"on" : @"off",
+            ProbeGroupEnabled(@"url")    ? @"on" : @"off",
+            ProbeGroupEnabled(@"net")    ? @"on" : @"off"];
+}
+
+//------------------------------------------------------------------------------
+#pragma mark - hook 机制自检
+//------------------------------------------------------------------------------
+// 这个自检是拿两次真机事故换来的，务必保留：
+//
+// 事故一：encoding 解析器把「大小/偏移」数字当成类型字符 -> 所有 hook 被自己的
+//         形状校验拒绝 -> 整个包空转，日志只剩一片 ✗。
+// 事故二：装上第一个转发 hook 时会**自己**给类加 forwardInvocation:，第二个 hook
+//         的「类自带 forwardInvocation:」检查把**我们自己加的那个**误判成冲突 ->
+//         每个类只能装上第一个 hook（22 个 URL hook 只装上 4 个）。
+//
+// 两个事故的共同点：安装逻辑本身坏了，而日志只显示「没装上」，看不出为什么。
+// 所以在装真实 hook 之前，先在一个临时类上把整条链路跑通：
+//   ① 同一个类连挂两个 hook —— 必须都成功（覆盖事故二）
+//   ② 真的给这个类发一次消息 —— 必须能正常走到原实现（覆盖转发链路本身）
+// 任一项失败就大声喊出来。
+
+static NSInteger gSelfTestHits = 0;
+static void bspSelfTestNoop(id self, SEL _cmd) { (void)self; (void)_cmd; gSelfTestHits++; }
+
+static BOOL ProbeHookSelfTest(void) {
+    Class scratch = objc_allocateClassPair([NSObject class], "BSPHookSelfTestClass", 0);
+    BOOL a = NO, b = NO, invoked = NO;
+    if (!scratch) {
+        PLogSync(@"hook", @"★★★ hook 自检失败：无法创建临时类，请把日志发回");
+        return NO;
+    }
+    class_addMethod(scratch, NSSelectorFromString(@"bspSelfTest1"), (IMP)bspSelfTestNoop, "v@:");
+    class_addMethod(scratch, NSSelectorFromString(@"bspSelfTest2"), (IMP)bspSelfTestNoop, "v@:");
+    objc_registerClassPair(scratch);
+
+    a = [BSPDynamicHook hookClass:@"BSPHookSelfTestClass" selector:@"bspSelfTest1"
+                     expectShapes:@"" before:nil after:nil];
+    b = [BSPDynamicHook hookClass:@"BSPHookSelfTestClass" selector:@"bspSelfTest2"
+                     expectShapes:@"" before:nil after:nil];
+
+    if (a && b) {
+        // 真发一次消息：走 _objc_msgForward -> forwardInvocation: -> invokeUsingIMP:
+        // 这一条要是崩了，说明转发链路本身不可用 —— 那比「没装上」严重得多，
+        // 而且现在就能发现，不用等真正播放时才发现。
+        id obj = [[scratch alloc] init];
+        gSelfTestHits = 0;
+        @try {
+            ((void (*)(id, SEL))objc_msgSend)(obj, NSSelectorFromString(@"bspSelfTest1"));
+            ((void (*)(id, SEL))objc_msgSend)(obj, NSSelectorFromString(@"bspSelfTest2"));
+            invoked = (gSelfTestHits == 2);
+        } @catch (NSException *ex) {
+            PLogSync(@"hook", @"★★★ hook 自检：调用被 hook 的方法抛异常 %@ — %@", ex.name, ex.reason);
+        }
+    }
+
+    PLogSync(@"hook", @"%@ hook 机制自检：同类双挂=%s/%s 转发调用=%s",
+             (a && b && invoked) ? @"✓" : @"★★★ 失败",
+             a ? "✓" : "✗", b ? "✓" : "✗", invoked ? "✓" : "✗");
+    if (!(a && b && invoked)) {
+        PLogSync(@"hook", @"★★★ hook 机制自检失败 —— 真实 hook 很可能大面积装不上或转发不可用，"
+                          @"请把整份日志发回，不要继续测播放。");
+    }
+    return a && b && invoked;
+}
+
 /// 把 inv 里第 idx 个参数（或返回值）取出字符串表示
 static NSString *ProbeStringFromArg(NSInvocation *inv, NSUInteger idx, BOOL isReturn) {
     __unsafe_unretained id obj = nil;
@@ -1861,9 +2016,12 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
             repl = ProbeRewriteIfMedia(s, s, &orig);
             if (!repl) return;
             ProbeBumpHookHit(hitKey);
+            // 必须先兜住生命周期再写回：NSInvocation 不 retain 返回值，
+            // 局部强引用出了作用域就释放，调用方拿到的是野指针。
+            ProbeKeepReturnAlive(repl);
             {
-                id strong = repl;   /* ARC：保证 setReturnValue 期间对象存活 */
-                [inv setReturnValue:&strong];
+                __unsafe_unretained id keep = repl;
+                [inv setReturnValue:&keep];
             }
             PLog(@"rewrite", @"★ [%@] %@ 返回值改写 host=%@ → 127.0.0.1:%u",
                  label, hitKey, [BSPCdnPool hostOf:orig] ?: @"?", (unsigned)[BSPProxyServer shared].port);
@@ -1893,13 +2051,16 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
         };
     }
 
+    // 同步落盘：如果某个 hook 让 App 立刻崩掉，这一行就是现场的最后一块拼图。
+    // （异步日志在进程几毫秒内死掉时会丢，那正是最需要它的时候。）
+    PLogSync(@"hook", @"… [阶段2/3] 正在安装 %@ :: %@（%@）", clsName, selName, label);
     ok = [BSPDynamicHook hookClass:clsName selector:selName expectShapes:shapes
                             before:before after:after];
     if (ok) {
-        PLog(@"hook", @"✓ [阶段2/3] %@ :: %@  enc=%@", clsName, selName,
-             [BSPDynamicHook typeEncodingOfClass:clsName selector:selName] ?: @"?");
+        PLogSync(@"hook", @"✓ [阶段2/3] %@ :: %@  enc=%@", clsName, selName,
+                 [BSPDynamicHook typeEncodingOfClass:clsName selector:selName] ?: @"?");
     } else {
-        PLog(@"hook", @"✗ [阶段2/3] %@ :: %@ 未安装（类/方法不存在或参数形状不符）", clsName, selName);
+        PLogSync(@"hook", @"✗ [阶段2/3] %@ :: %@ 未安装（原因见上一行）", clsName, selName);
     }
     return ok;
 }
@@ -2074,9 +2235,12 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
             @synchronized (gLivePlayers) { [gLivePlayers addObject:t]; }
         };
 
+        // 装之前先写一行同步日志：万一这个 hook 自身就把 App 搞崩，
+        // 日志会停在「正在安装 X」—— 直接点名，不用猜。
+        PLogSync(@"hook", @"… [播放器] 正在安装 %@ :: %@（%@）", clsName, selName, label);
         BOOL ok = [BSPDynamicHook hookClass:clsName selector:selName expectShapes:shapes
                                      before:before after:after];
-        PLog(@"hook", @"%@ [播放器] %@ :: %@  %@", ok ? @"✓" : @"✗", clsName, selName, label);
+        PLogSync(@"hook", @"%@ [播放器] %@ :: %@  %@", ok ? @"✓" : @"✗", clsName, selName, label);
     }
 }
 
@@ -2147,9 +2311,13 @@ static NSString *ProbePlayerSnapshot(void) {
 {
     // hook 器的诊断必须进 trace.log。上一版它们走 NSLog（侧载 App 里不进文件），
     // 于是「22 个 hook 全部拒绝安装」这件事在真机日志里只剩一片 ✗，看不出原因。
-    BSPDynamicHookSetLogSink(^(NSString *msg) { PLog(@"hook", @"%@", msg); });
+    // hook 器的诊断必须进 trace.log。上一版它们走 NSLog（侧载 App 里不进文件），
+    // 于是「22 个 hook 全部拒绝安装」这件事在真机日志里只剩一片 ✗，看不出原因。
+    // 这里刻意用**同步**写：崩在安装阶段时，拒绝原因必须活下来。
+    BSPDynamicHookSetLogSink(^(NSString *msg) { PLogSync(@"hook", @"%@", msg); });
 
     PLog(@"hook", @"──── 阶段 0：播放正证据 + 全网观测 ────");
+    PLogSync(@"hook", @"hook 分组开关：%@（可在 biliprobe/hooks.txt 里改）", ProbeGroupsDescription());
 
     // ---- 解析器自检（金丝雀）----
     //
@@ -2190,9 +2358,15 @@ static NSString *ProbePlayerSnapshot(void) {
                                 NSPointerFunctionsObjectPointerPersonality];
     }
     if (!gTaskHostHist) gTaskHostHist = [NSMutableDictionary dictionary];
+
+    // 先验证 hook 机制本身可用，再装真实 hook。
+    // 顺序很重要：自检失败时，日志里能明确看到「是机制坏了」而不是「没装上」。
+    ProbeHookSelfTest();
     // ---- A. 播放器生命周期：拿到实例，之后由心跳轮询它自己报数 ----
     // shapes 全部取自真机 classes.txt 的 method_getTypeEncoding。
-    {
+    if (!ProbeGroupEnabled(@"player")) {
+        PLogSync(@"hook", @"· [播放器] 分组 player=off，跳过（改 biliprobe/hooks.txt 可打开）");
+    } else {
         struct { const char *cls; const char *sel; const char *shapes; const char *label; } t[] = {
             {"IJKFFMoviePlayerControllerFFPlay", "play",                          "",  "开始播放"},
             {"IJKFFMoviePlayerControllerFFPlay", "prepareToPlay",                 "",  "准备播放"},
@@ -2224,7 +2398,7 @@ static NSString *ProbePlayerSnapshot(void) {
     }
 
     // ---- B. 播放器视图控制器出现 = 用户确实进了视频页 ----
-    {
+    if (ProbeGroupEnabled(@"player")) {
         for (NSString *cn in @[@"BBPlayerViewController", @"BBPgcPlayerViewController"]) {
             if (!NSClassFromString(cn)) continue;
             [self probe_hookPlayerLifecycle:cn selector:@"viewDidAppear:" shapes:@"B" label:@"进入视频页"];
@@ -2239,37 +2413,37 @@ static NSString *ProbePlayerSnapshot(void) {
     //   NSURLRequest 的 ObjC 初始化（CoreFoundation 内部直接造 __NSCFURLRequest），
     //   或者走的是 dataTaskWithURL: 这类我没挂的工厂。
     //   resume 是所有任务最终都必须走的一步，挂它才是真正全覆盖。
-    {
-        BSPHookHandler before = ^(NSInvocation *inv, BOOL *skip) {
-            (void)skip;
-            id task = inv.target;
-            NSURLRequest *r = nil;
-            NSString *host;
-            if (![task respondsToSelector:@selector(originalRequest)]) return;
-            r = [task originalRequest];
-            if (![r isKindOfClass:NSURLRequest.class]) return;
-            if (ProbeIsOurProxyUpstream(r)) return;
-
-            ProbeBump(&gCntTaskResume);
-            host = r.URL.host.lowercaseString ?: @"(无host)";
-            @synchronized (gTaskHostHist) {
-                gTaskHostHist[host] = @([gTaskHostHist[host] integerValue] + 1);
-            }
-            if (ProbeHostLooksLikeMedia(r.URL)) {
-                PLog(@"session", @"★ 任务 resume 命中媒体 host=%@ method=%@ range=%@\n          URL=%.300@",
-                     host, r.HTTPMethod ?: @"?", [r valueForHTTPHeaderField:@"Range"] ?: @"(无)",
-                     r.URL.absoluteString ?: @"?");
-            }
-        };
+    //
+    // ⚠ 用**直连**方式挂，不用转发。
+    //
+    // 为什么（真机日志换来的教训，务必保留）：
+    //   上一版用转发方式挂 NSURLSessionTask::resume —— 在类上加 forwardInvocation:，
+    //   把实现换成 _objc_msgForward。安装全部成功，但日志停在
+    //      12:06:12.746 [session] 媒体请求 host=i2.hdslb.com
+    //   之后进程就死了：那正是第一次 task resume。
+    //   根因是 NSURLSessionTask 是**系统 class cluster**，实例的真类是
+    //   __NSCFURLSessionTask（CoreFoundation 支撑）。这类具体类可能自带
+    //   forwardInvocation: / methodSignatureForSelector:，把我们的转发器遮住，
+    //   转发链拿不到方法签名 —— 消息无人认领，直接抛异常崩掉。
+    //   转发那套在普通 NSObject 子类上很成熟（Aspects 就用它），但系统类上不安全。
+    //
+    // 直连方式没有这个问题：resume 的签名是 v16@0:8（零参数），
+    // 我们自己写的 C 函数 void f(id, SEL) 与它严格对应，装前还会用
+    // expectShapes 校验一次形状。既没有 NSInvocation 开销，也完全绕开转发链。
+    if (!ProbeGroupEnabled(@"net")) {
+        PLogSync(@"hook", @"· [全网] 分组 net=off，跳过 NSURLSessionTask.resume "
+                          @"（想看 App 到底请求了谁，就在 biliprobe/hooks.txt 写 net=on）");
+    } else {
+        PLogSync(@"hook", @"… [全网] 正在安装 NSURLSessionTask :: resume（直连方式）");
         BOOL ok = [BSPDynamicHook hookClass:@"NSURLSessionTask" selector:@"resume"
-                               expectShapes:@"" before:before after:nil];
-        PLog(@"hook", @"%@ [全网] NSURLSessionTask :: resume（覆盖所有任务，不论怎么建出来的）",
-             ok ? @"✓" : @"✗");
+                               expectShapes:@"" directImp:(IMP)ProbeTaskResume
+                                   storeOld:(IMP *)&gOrigTaskResume];
+        PLogSync(@"hook", @"%@ [全网] NSURLSessionTask :: resume（直连，覆盖所有任务）",
+                 ok ? @"✓" : @"✗");
 
-        [BSPDynamicHook hookClass:@"NSURLSession" selector:@"dataTaskWithURL:"
-                     expectShapes:@"@" before:nil after:nil];
-        [BSPDynamicHook hookClass:@"NSURLSession" selector:@"dataTaskWithURL:completionHandler:"
-                     expectShapes:@"@?" before:nil after:nil];
+        // 刻意不再挂 NSURLSession 的 dataTaskWithURL: 系列 ——
+        // resume 是**所有**任务（不论由哪个工厂造出来）的必经之路，已经全覆盖；
+        // 多挂系统类的工厂方法只是徒增风险（它们同样属于 class cluster）。
 
         // 关键自检：resume 到底实现在哪一层。
         // 若具体类自己实现了 resume，挂在 NSURLSessionTask 上的 hook 就永远不会响
@@ -2287,9 +2461,9 @@ static NSString *ProbePlayerSnapshot(void) {
                 [s appendFormat:@"      %@：%@\n", cn, overrides ? @"自己实现了 resume（会绕过我的 hook）"
                                                                 : @"继承 NSURLSessionTask 的 resume"];
             }
-            PLog(@"hook", @"· [全网] resume 实现层自检：%@\n%@",
-                 baseImp ? @"NSURLSessionTask 上有 resume" : @"!! NSURLSessionTask 上没有 resume，hook 未安装",
-                 s.length ? s : @"      （未找到已知的具体类）");
+            PLogSync(@"hook", @"· [全网] resume 实现层自检：%@\n%@",
+                     baseImp ? @"NSURLSessionTask 上有 resume" : @"!! NSURLSessionTask 上没有 resume，hook 未安装",
+                     s.length ? s : @"      （未找到已知的具体类）");
         }
     }
 
