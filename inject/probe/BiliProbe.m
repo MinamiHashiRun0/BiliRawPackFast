@@ -246,6 +246,9 @@ static IMP         ProbeFetchOriginal(Class cls, SEL sel);
 /// 「是否真的在播」只能以它为准，不能拿「我的 hook 有没有响」去推断。
 static NSString   *ProbePlayerSnapshot(void);
 
+/// 改写落点汇总（定义在阶段 2/3 一节，结论段要用，故前置声明）
+static NSString   *ProbeRewriteSummary(void);
+
 /// 统一转发：查回原实现并调用它，把真实返回值带回。
 /// 探针「零行为改动」就靠这个函数 —— 调用方拿到的就是 App 原本会拿到的结果。
 static BOOL        ProbeForwardToOriginal(id self, SEL cmd, id a1, id a2);
@@ -1200,10 +1203,9 @@ static void ProbeEmitVerdict(NSString *phase) {
                      @"| 预加载=%d | URLProtocol=%d/%d | ★落盘=%d",
          hookClasses, setDel, waits, sessMedia, reqBuilt, dlInit, dlTask, assetInit, loaderCls,
          preloads, protos, protoStarts, dlWithUrl);
-    PLog(@"verdict", @"阶段2/3：URL承载hook触发=%d 见到媒体URL=%d 已改写=%d | 代理请求=%lu 上游分片=%lu",
-         urlHooks, urlSeen, urlRewrote,
-         (unsigned long)[BSPProxyServer shared].totalRequests,
-         (unsigned long)[BSPProxyServer shared].rewrittenURLCount);
+    PLog(@"verdict", @"阶段2/3：URL承载hook触发=%d 见到媒体URL=%d 已改写=%d", urlHooks, urlSeen, urlRewrote);
+    PLog(@"verdict", @"%@", [[BSPProxyServer shared] throughputLine]);
+    PLog(@"verdict", @"改写落点汇总：%@", ProbeRewriteSummary());
 
     // ── 播放正证据：不再靠推断「有没有在播」 ──
     PLog(@"verdict", @"播放正证据：播放器生命周期命中=%d 播放页出现=%d | 全网任务 resume=%d",
@@ -1754,6 +1756,8 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
                 PLog(@"beat", @"  播放正证据：生命周期=%d 播放页=%d 全网任务=%d\n%@",
                      ProbeRead(&gCntPlayerLifecycle), ProbeRead(&gCntPlayerVCAppear),
                      ProbeRead(&gCntTaskResume), ProbePlayerSnapshot());
+                // 代理吞吐逐次心跳打一行：这是判断「到底有没有变快」的唯一量化依据。
+                PLog(@"beat", @"  %@", [[BSPProxyServer shared] throughputLine]);
 
                 // 第 3 次心跳（约 45 秒）补写一次结论：此时用户多半已播放过视频
                 if (beats == 3) ProbeWriteVerdict(@"45 秒", true);
@@ -1829,6 +1833,43 @@ static void ProbeTaskResume(id self, SEL _cmd) {
         }
     }
     if (gOrigTaskResume) gOrigTaskResume(self, _cmd);
+}
+
+/// 改写日志去重：同一条 URL 只详细打一次，之后只计数。
+/// 真机日志里 62 条改写塞满了带签名的完整 URL（每条 400+ 字符），
+/// 把「代理跑了多少、多快」这类关键信息全淹了 —— 这是上一版最影响判读的问题。
+static NSMutableSet        *gRewriteLogged = nil;
+static NSMutableDictionary *gRewriteCounts = nil;
+
+static void ProbeLogRewrite(NSString *tag, NSString *hookKey, NSString *label, NSString *orig)
+{
+    if (!gRewriteLogged) gRewriteLogged = [NSMutableSet set];
+    if (!gRewriteCounts) gRewriteCounts = [NSMutableDictionary dictionary];
+    @synchronized (gRewriteLogged) {
+        NSNumber *n = gRewriteCounts[hookKey];
+        gRewriteCounts[hookKey] = @(n.integerValue + 1);
+        if ([gRewriteLogged containsObject:orig]) return;
+        [gRewriteLogged addObject:orig];
+        PLog(@"rewrite", @"★ [%@] %@ 改写主机 %@ → 127.0.0.1:%u（%.70@…）",
+             label, hookKey, [BSPCdnPool hostOf:orig] ?: @"?",
+             (unsigned)[BSPProxyServer shared].port, orig);
+    }
+}
+
+/// 改写落点汇总，写进结论段：哪个落点命中多少次一目了然
+static NSString *ProbeRewriteSummary(void)
+{
+    NSMutableString *s;
+    NSArray *keys;
+    if (!gRewriteCounts.count) return @"（还没有任何改写）";
+    keys = [gRewriteCounts.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return [gRewriteCounts[b] compare:gRewriteCounts[a]];
+    }];
+    s = [NSMutableString string];
+    for (NSString *k in keys) {
+        [s appendFormat:@"\n      %-64@ %@ 次", k, gRewriteCounts[k]];
+    }
+    return s;
 }
 
 /// 改写返回值时的保命池。
@@ -1975,9 +2016,40 @@ static NSString *ProbeStringFromArg(NSInvocation *inv, NSUInteger idx, BOOL isRe
     return nil;
 }
 
+/// 「这个落点收到的参数不是字符串」—— 只记第一次，把真实类型/内容 dump 出来。
+/// 上一版 willOpenUrl: 命中 2 次却毫无输出，就是缺了这一条。
+static void ProbeDescribeUnhandledArg(NSInvocation *inv, NSUInteger idx,
+                                      NSString *hookKey, NSString *label)
+{
+    static NSMutableSet *seen = nil;
+    __unsafe_unretained id obj = nil;
+    if (!seen) seen = [NSMutableSet set];
+    @synchronized (seen) {
+        if ([seen containsObject:hookKey]) return;
+        [seen addObject:hookKey];
+    }
+    @try { [inv getArgument:&obj atIndex:idx]; } @catch (__unused NSException *ex) { obj = nil; }
+
+    if (!obj) {
+        PLog(@"rewrite", @"· [%@] %@ 收到了 nil（无可改写）", label, hookKey);
+        return;
+    }
+    if ([obj isKindOfClass:NSArray.class]) {
+        NSArray *a = obj;
+        NSMutableString *d = [NSMutableString string];
+        for (NSUInteger i = 0; i < a.count && i < 6; i++)
+            [d appendFormat:@"\n        [%lu] <%@> %.160@", (unsigned long)i,
+             NSStringFromClass([a[i] class]), [a[i] description]];
+        PLog(@"rewrite", @"· [%@] %@ 收到的是数组（%lu 项），不是 URL：%@",
+             label, hookKey, (unsigned long)a.count, d);
+        return;
+    }
+    PLog(@"rewrite", @"· [%@] %@ 收到的是 <%@>，不是 URL：%.240@",
+         label, hookKey, NSStringFromClass([obj class]), [obj description]);
+}
+
 /// 若字符串是 B 站媒体 URL，返回应替换成的等价对象（保持原类型）
-static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) {
-    NSString *local;
+static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) {    NSString *local;
     if (![BSPCdnPool isMediaURL:s]) return nil;
 
     ProbeBump(&gCntMediaUrlSeen);
@@ -2023,8 +2095,7 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
                 __unsafe_unretained id keep = repl;
                 [inv setReturnValue:&keep];
             }
-            PLog(@"rewrite", @"★ [%@] %@ 返回值改写 host=%@ → 127.0.0.1:%u",
-                 label, hitKey, [BSPCdnPool hostOf:orig] ?: @"?", (unsigned)[BSPProxyServer shared].port);
+            ProbeLogRewrite(@"rewrite", hitKey, label, orig);
         };
     } else {
         before = ^(NSInvocation *inv, BOOL *skip) {
@@ -2036,7 +2107,12 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
             ProbeBumpHookHit(hitKey);
 
             s = ProbeStringFromArg(inv, argIndex, NO);
-            if (!s) return;
+            if (!s) {
+                // 参数不是字符串/URL。第一次遇到时把它的真实类型记下来 ——
+                // 上一版 willOpenUrl: 命中 2 次却一片空白，就是因为这里悄悄返回了。
+                ProbeDescribeUnhandledArg(inv, argIndex, hitKey, label);
+                return;
+            }
             repl = ProbeRewriteIfMedia(s, s, &orig);
             if (!repl) return;
 
@@ -2044,10 +2120,7 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
                 __unsafe_unretained id keep = repl;   /* 不改引用计数，只保证生命周期 */
                 [inv setArgument:&keep atIndex:argIndex];
             }
-            PLog(@"rewrite", @"★ [%@] %@ 参数改写 host=%@ → 127.0.0.1:%u\n"
-                             @"     原: %.200@",
-                 label, hitKey, [BSPCdnPool hostOf:orig] ?: @"?",
-                 (unsigned)[BSPProxyServer shared].port, orig);
+            ProbeLogRewrite(@"rewrite", hitKey, label, orig);
         };
     }
 
@@ -2072,6 +2145,10 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
 
     // 回环代理先起来；起不来就完全不改写（宁可不加速，也不能砸播放）
     {
+        // 代理侧日志必须进 trace.log：NSLog 在侧载 App 里不进 Documents，
+        // 「代理跑了多少、多快」这条唯一能量化效果的线索会整条丢失。
+        BSPProxySetLogSink(^(NSString *msg) { PLog(@"proxy", @"%@", msg); });
+
         BSPProxyServer *p = [BSPProxyServer shared];
         BOOL started = [p start];
         if (started) {
@@ -2088,6 +2165,11 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
         struct { const char *cls; const char *sel; BSPUrlArgMode mode; NSUInteger idx;
                  const char *shapes; const char *label; } tbl[] = {
             // IJKMediaPlayerItem：URL 真正进入播放内核的地方
+            //
+            // willOpenUrl: 上一版只命中了 2 次、且一个字都没改写 —— 说明它收到的
+            // **不是** URL 字符串（我的 ProbeStringFromArg 对非字符串返回 nil，
+            // 而且当时连「收到了什么」都没记）。这里补一个只观测不干预的 dump，
+            // 把参数的真实类型与内容打出来，下一轮就有依据了。
             {"IJKMediaPlayerItem", "willOpenUrl:",       BSPUrlArgIn, 2, "@",      "IJK即将打开"},
             {"IJKMediaPlayerItem", "setUrl:",            BSPUrlArgIn, 2, "@",      "IJK设置URL"},
             {"IJKMediaPlayerItem", "updateUrl:resolved:",BSPUrlArgIn, 2, "@B",     "IJK更新URL"},
@@ -2118,6 +2200,19 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
 
             // 预加载
             {"BBPlayerPreloadNextItem", "setPreloadUrl:", BSPUrlArgIn, 2, "@", "预加载URL"},
+
+            // ---- 读侧兜底：直接改写 getter 的返回值 ----
+            //
+            // 为什么还要挂读侧：上一版实测发现 IJKDashStreamItem 的 setBackupUrl0:
+            // 命中了 21 次、setBaseUrl: 却一次没命中 —— 说明 baseUrl 不是走 setter
+            // 赋值的（可能是 KVC、__NSCFType 桥接或 protobuf 直填）。
+            // 只挂写侧就会漏掉这类字段。而**读侧是终点**：不管当初怎么赋的值，
+            // 谁来读都会经过 getter，在那里换掉最稳。
+            {"IJKDashStreamItem", "baseUrl",     BSPUrlArgOut, 0, "",  "DASH主URL读"},
+            {"IJKDashStreamItem", "backupUrl0",  BSPUrlArgOut, 0, "",  "DASH备URL0读"},
+            {"IJKDashStreamItem", "backupUrl1",  BSPUrlArgOut, 0, "",  "DASH备URL1读"},
+            {"IJKMediaPlayerItem", "url",        BSPUrlArgOut, 0, "",  "IJK当前URL读"},
+            {"IJKDashStreamBridge", "url",       BSPUrlArgOut, 0, "",  "DASH桥URL读"},
         };
 
         NSUInteger total = sizeof(tbl) / sizeof(tbl[0]);

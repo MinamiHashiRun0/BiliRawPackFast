@@ -35,6 +35,14 @@ NS_ASSUME_NONNULL_BEGIN
 /* 本次会话的统计报告（多行文本，写进 trace.log 的 [perf] 段） */
 - (NSString *)statsReport;
 
+/* 一行式吞吐摘要（心跳用）：请求/分片/送达字节/累计均速/单请求峰值/改写数 */
+- (NSString *)throughputLine;
+
+/* 把代理侧日志接进宿主的日志文件。
+ * 必需：NSLog 在侧载 App 里不进 Documents 下的 trace.log，
+ * 于是「代理到底跑了多少、多快」这条唯一能量化效果的线索会整条丢失。 */
+void BSPProxySetLogSink(void (^sink)(NSString *msg));
+
 /* 日志目录 {Documents}/biliprobe（会确保存在）。
  * 公开出来是因为 hooks.txt / mode.txt 这些开关文件都放在这里。 */
 + (NSString *)logDir;

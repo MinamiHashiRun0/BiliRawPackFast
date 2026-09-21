@@ -15,8 +15,16 @@
 /* ------------------------------------------------------------------ */
 /* 调参                                                                */
 /* ------------------------------------------------------------------ */
-static const int64_t  kChunkBytes        = 256 * 1024;
-static const NSInteger kWindow           = 12;
+/* 分片大小 512 KiB、窗口 16。
+ *
+ * 为什么从 256 KiB/12 调大：真机日志显示换成直连 CDN 之后，每个分片的实测
+ * 速率常常只有 0.1~0.5 MiB/s（海外到国内的单条连接就这水平）。256 KiB 在这种
+ * 速率下要跑 0.5~2.5 秒，而每条 TCP+TLS 建连本身的往返就要几百毫秒 ——
+ * 固定开销占比过高。加大分片能摊薄建连成本，加宽窗口能同时压更多链路。
+ * （这是基于实测数值的调整，不是拍脑袋；下一版日志里的「单请求峰值」可以直接
+ *   验证调大之后有没有真的变快。） */
+static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 */
+static const NSInteger kWindow           = 16;            /* 每连接的并发窗口 */
 static const NSInteger kBlacklistErrors  = 3;
 static const double   kFirstChunkTimeout = 4.0;   /* 首片超过这么久就 fail-open 回源 */
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
@@ -37,6 +45,24 @@ static const int      kRecvTimeoutSec    = 15;
 static const double   kPerHostCapBps     = 0.0;
 
 static double bsp_now(void) { return [NSDate timeIntervalSinceReferenceDate]; }
+
+/* 日志出口。默认 NSLog，但 NSLog 在侧载 App 里**不会**进 Documents 下的 trace.log
+ * —— 代理侧的每一次分片抓取、每一个失败节点都因此看不见，而「代理到底跑了多少、
+ * 多快」恰恰是判断这一版有没有用的唯一依据。 */
+static void (^gProxyLog)(NSString *msg) = nil;
+
+void BSPProxySetLogSink(void (^sink)(NSString *msg)) { gProxyLog = [sink copy]; }
+
+static void PLogProxy(NSString *fmt, ...)
+{
+    va_list ap;
+    NSString *msg;
+    va_start(ap, fmt);
+    msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    if (gProxyLog) gProxyLog(msg);
+    else NSLog(@"[BSPProxy] %@", msg);
+}
 
 static NSSet *kDropReqHeaders(void)
 {
@@ -118,6 +144,10 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) NSUInteger failedChunks;
 @property (nonatomic, assign) NSUInteger rewrittenCount;
 @property (nonatomic, assign) NSUInteger redirects;
+@property (nonatomic, assign) int64_t servedBytes;       /* 累计发给客户端 */
+@property (nonatomic, assign) double servedSeconds;      /* 累计传输耗时 */
+@property (nonatomic, assign) NSUInteger completedRequests;
+@property (nonatomic, assign) double peakMiBps;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, assign) BSPMSPlanner *planner;  /* 全局共享，跨请求学习 */
 @property (nonatomic, strong) NSMutableArray<NSString *> *hosts;
@@ -344,6 +374,34 @@ static NSSet *kDropReqHeaders(void)
 
 - (NSUInteger)rewrittenURLCount { return _rewrittenCount; }
 - (NSUInteger)totalRequests    { return _totalRequests; }
+
+/// URL 的紧凑写法：host + 末段路径。日志里塞完整签名 URL 会把有用信息淹掉。
+- (NSString *)shortURL:(NSString *)url
+{
+    NSURL *u = [NSURL URLWithString:url ?: @""];
+    NSString *last = u.lastPathComponent ?: @"?";
+    return [NSString stringWithFormat:@"%@/…/%@", u.host ?: @"?", last];
+}
+
+/// 一行式吞吐摘要，供心跳与结论段使用。
+- (NSString *)throughputLine
+{
+    NSString *s;
+    [_lock lock];
+    {
+        double mib = (double)_servedBytes / 1048576.0;
+        double agg = _servedSeconds > 0.05 ? mib / _servedSeconds : 0.0;
+        s = [NSString stringWithFormat:
+             @"代理：请求=%lu 完成=%lu 上游分片=%lu 失败=%lu 302回源=%lu | "
+             @"送达 %.2f MiB 累计均速 %.2f MiB/s 单请求峰值 %.2f MiB/s | 重写URL=%lu",
+             (unsigned long)_totalRequests, (unsigned long)_completedRequests,
+             (unsigned long)_totalChunks, (unsigned long)_failedChunks,
+             (unsigned long)_redirects,
+             mib, agg, _peakMiBps, (unsigned long)_rewrittenCount];
+    }
+    [_lock unlock];
+    return s;
+}
 
 #pragma mark - 统计
 
@@ -596,7 +654,8 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kFirstChunkTimeout * NSEC_PER_SEC)),
                        ctx.q, ^{
             if (wc.closed || wc.firstChunkArrived || wc.failed || wc.headerSent) return;
-            NSLog(@"[BSPProxy] 首片 %.1fs 未到，fail-open 302 回源", kFirstChunkTimeout);
+            PLogProxy(@"首片 %.1fs 未到，fail-open 302 回源: %@",
+                      kFirstChunkTimeout, [self shortURL:wc.url]);
             [self sendFailOpenRedirect:wc];
         });
     }
@@ -796,9 +855,9 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     }
     [_lock unlock];
 
-    NSLog(@"[BSPProxy] 分片失败 %lld-%lld @ %@ (%@) 重试余 %ld",
-          (long long)s, (long long)e, host, reason, (long)retry);
-    if (blacklisted) NSLog(@"[BSPProxy] 拉黑 %@（连续 %ld 次失败）", host, (long)kBlacklistErrors);
+    PLogProxy(@"分片失败 %lld-%lld @ %@ (%@) 重试余 %ld",
+              (long long)s, (long long)e, host, reason, (long)retry);
+    if (blacklisted) PLogProxy(@"拉黑 %@（连续 %ld 次失败）", host, (long)kBlacklistErrors);
 
     /* 重试复用同一个在途槽位，不改 outstanding */
     if (retry > 0 && nextHost >= 0 && !ctx.closed && !ctx.failed) {
@@ -899,8 +958,15 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     {
         double dt = ctx.tLast - ctx.tFirst;
         double mib = (double)ctx.bytesToClient / 1048576.0;
-        NSLog(@"[BSPProxy] 完成 %.2f MiB 用时 %.2fs 均速 %.2f MiB/s",
-              mib, dt, dt > 0.05 ? mib / dt : 0.0);
+        double mbps = dt > 0.05 ? mib / dt : 0.0;
+        PLogProxy(@"完成 %@  %.2f MiB / %.2fs = %.2f MiB/s",
+                  [self shortURL:ctx.url], mib, dt, mbps);
+        [_lock lock];
+        _servedBytes += ctx.bytesToClient;
+        _servedSeconds += (dt > 0.05 ? dt : 0.0);
+        _completedRequests++;
+        if (mbps > _peakMiBps) _peakMiBps = mbps;
+        [_lock unlock];
     }
     [self closeConn:ctx];
 }
