@@ -72,11 +72,18 @@ CPU_NAMES = {0x0100000C: "arm64", 0x01000007: "x86_64", 7: "i386", 12: "arm"}
 
 def main():
     ipa = sys.argv[1] if len(sys.argv) > 1 else "deliver/bili-9.12.0-probe-injected.ipa"
+    # 期望注入的是哪个模块：从文件名推断，也可用第二个参数显式指定。
+    # 之前这里把 "BiliProbe" 写死了，导致给 BiliFast 包做校验时输出误导性结论
+    # （既说"没找到 BiliProbe.dylib"，又说"主二进制引用了 BiliProbe.dylib"）。
+    expect = sys.argv[2] if len(sys.argv) > 2 else None
+    if not expect:
+        expect = "BiliFast" if "BiliFast" in ipa else "BiliProbe"
     f = Path(ipa)
     if not f.exists():
         raise SystemExit("找不到 %s" % ipa)
 
-    print("IPA: %s  (%.1f MiB)" % (f.name, f.stat().st_size / 1048576))
+    print("IPA: %s  (%.1f MiB)   期望注入: %s.dylib"
+          % (f.name, f.stat().st_size / 1048576, expect))
 
     ok = True
     with zipfile.ZipFile(f) as z:
@@ -98,12 +105,12 @@ def main():
         print("\n[1] Frameworks 下的 dylib：%d 个" % len(dylib_entries))
         for n in dylib_entries:
             print("    %s  (%d 字节)" % (n.split("/")[-1], z.getinfo(n).file_size))
-        probe = [n for n in dylib_entries if "BiliProbe" in n]
+        probe = [n for n in dylib_entries if expect in n]
         if not probe:
-            print("    ✗ 没找到 BiliProbe.dylib —— 这个包不该发给用户")
+            print("    ✗ 没找到 %s.dylib —— 这个包不该发给用户" % expect)
             ok = False
         else:
-            print("    ✓ BiliProbe.dylib 已就位")
+            print("    ✓ %s.dylib 已就位" % expect)
 
         # 2) 主二进制里有没有指向它的 LC_LOAD_DYLIB
         exe = "%s/%s" % (app_dir, app[:-4])
@@ -124,17 +131,22 @@ def main():
             if dl is None:
                 continue
             name = CPU_NAMES.get(cputype, hex(cputype))
-            hits = [(d, w) for d, w in dl if "BiliProbe" in d]
-            print("    切片 %s：共 %d 条 LC_LOAD_DYLIB，其中 BiliProbe %d 条"
-                  % (name, len(dl), len(hits)))
+            hits = [(d, w) for d, w in dl if expect in d]
+            print("    切片 %s：共 %d 条 LC_LOAD_DYLIB，其中 %s %d 条"
+                  % (name, len(dl), expect, len(hits)))
             for d, weak in hits:
                 print("        %s%s" % (d, "  (weak)" if weak else ""))
                 if not weak:
                     found = True
+            # 加载路径必须以期望的模块名结尾，否则 dyld 会找不到库直接闪退
+            for d, _w in dl:
+                if d.endswith(".dylib") and ("BiliProbe" in d or "BiliFast" in d) and expect not in d:
+                    print("    ✗ 加载路径指向了别的模块：%s（应为 %s.dylib）—— 会启动闪退" % (d, expect))
+                    ok = False
         if found:
-            print("    ✓ 主二进制已引用 BiliProbe.dylib（强链接，缺失会导致启动崩溃）")
+            print("    ✓ 主二进制已引用 %s.dylib（强链接，缺失会导致启动崩溃）" % expect)
         else:
-            print("    ✗ 主二进制没有引用 BiliProbe.dylib —— dylib 不会加载")
+            print("    ✗ 主二进制没有引用 %s.dylib —— dylib 不会加载" % expect)
             ok = False
 
         # 3) Info.plist 的 Documents 共享开关（决定用户能否在「文件」App 里看到日志）

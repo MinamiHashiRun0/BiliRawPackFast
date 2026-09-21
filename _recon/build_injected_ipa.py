@@ -19,12 +19,23 @@ import os, shutil, struct, sys, tempfile, zipfile, importlib.util
 
 ROOT = r"E:\Documents\DSHWork\BiliRawPackFast"
 IPA = os.path.join(ROOT, "哔哩哔哩-弹幕番剧直播高清视频_9.12.0.ipa")
-DYLIB = os.path.join(ROOT, "deliver", "BiliProbe.dylib")
-OUT_IPA = os.path.join(ROOT, "deliver", "bili-9.12.0-probe-injected.ipa")
+
+# 要打包哪个 dylib：
+#   python build_injected_ipa.py              -> BiliProbe（探针，取证用）
+#   python build_injected_ipa.py BiliFast     -> BiliFast（正式模块，日常用）
+MODULE = sys.argv[1] if len(sys.argv) > 1 else "BiliProbe"
+if MODULE not in ("BiliProbe", "BiliFast"):
+    raise SystemExit("模块名只能是 BiliProbe 或 BiliFast，收到: %r" % MODULE)
+
+DYLIB = os.path.join(ROOT, "deliver", MODULE + ".dylib")
+if MODULE == "BiliProbe":
+    OUT_IPA = os.path.join(ROOT, "deliver", "bili-9.12.0-probe-injected.ipa")
+else:
+    OUT_IPA = os.path.join(ROOT, "deliver", "bili-9.12.0-BiliFast-injected.ipa")
 
 APP = "Payload/bili-universal.app"
 EXE = f"{APP}/bili-universal"
-DYLIB_IN_APP = f"{APP}/Frameworks/BiliProbe.dylib"
+DYLIB_IN_APP = f"{APP}/Frameworks/{MODULE}.dylib"
 
 LC_LOAD_DYLIB = 0x0C
 LC_CODE_SIGNATURE = 0x1D
@@ -97,7 +108,7 @@ def load_injector():
 
 
 def main():
-    for p, what in ((IPA, "脱壳 IPA"), (DYLIB, "BiliProbe.dylib")):
+    for p, what in ((IPA, "脱壳 IPA"), (DYLIB, MODULE + ".dylib")):
         if not os.path.exists(p):
             print(f"找不到{what}: {p}")
             return 1
@@ -136,7 +147,7 @@ def main():
                   f"含 entitlements 槽={had_ent}")
 
         macho = inj.MachO(raw)
-        name = "@executable_path/Frameworks/BiliProbe.dylib"
+        name = "@executable_path/Frameworks/%s.dylib" % MODULE
         if name in macho.dylibs:
             print("② 主二进制已含该 LC_LOAD_DYLIB，跳过")
             added_lc = 0
@@ -181,7 +192,7 @@ def main():
                              allowZip64=True) as zout:
             names = zin.namelist()
             if DYLIB_IN_APP in names:
-                print("⚠️ 原 IPA 里已有 BiliProbe.dylib，将覆盖")
+                print("⚠️ 原 IPA 里已有 %s.dylib，将覆盖" % MODULE)
             # 先写 dylib 之外的所有条目
             for info in zin.infolist():
                 if info.filename == EXE or info.filename == DYLIB_IN_APP:
@@ -263,9 +274,12 @@ def main():
         print("\n预注入版 IPA 组装完成 ✅")
         print("\n下一步（在手机上）：")
         print("  1. 全能签打开该 IPA → 用自己的证书签名安装")
-        print("     （**不要**再启用插件注入 BiliProbe.dylib，否则加载两次）")
+        print("     （**不要**再启用插件注入 %s.dylib，否则加载两次）" % MODULE)
         print("  2. 打开 App → 播一个视频 → **停留 60 秒以上**（中途别切出去）")
-        print("  3. 文件 App → 我的 iPhone → 哔哩哔哩 → biliprobe/ → 发 trace.log")
+        if MODULE == "BiliProbe":
+            print("  3. 文件 App → 我的 iPhone → 哔哩哔哩 → biliprobe/ → 发 trace.log")
+        else:
+            print("  3. 文件 App → 我的 iPhone → 哔哩哔哩 → %s/ → 看 report.txt" % MODULE)
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
