@@ -68,9 +68,8 @@ static NSString        *gLogDir;
  *   → 队列堆积 → 饿死主线程事件投递 → UI 冻死（小球拖不动、不闪退）。
  *   多 host 旧版没卡只是因为散到国内节点快速失败回源、代理基本空转、日志极少。
  * 异步后：调用线程只做一次 NSString 拼接 + dispatch_async，零 IO、无锁竞争。 */
-static dispatch_queue_t gLogQueue;
-static NSMutableArray<NSData *> *gLogBuf;
-static dispatch_queue_t gLogBufQueue;
+static dispatch_queue_t gLogQueue;          /* 唯一的日志串行队列：缓冲与写盘都在这上面 */
+static NSMutableArray<NSData *> *gLogBuf;   /* 仅由 gLogQueue 访问，无需额外加锁 */
 
 static void FLogFlush(NSMutableArray<NSData *> *batch)
 {
@@ -103,16 +102,27 @@ static void FLogv(NSString *tag, NSString *fmt, va_list ap)
         NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
         if (!d) return;
 
-        /* 调用线程零阻塞：只入缓冲区。真正的写盘在 gLogQueue 串行做。 */
-        dispatch_barrier_async(gLogBufQueue, ^{
+        /* 队列还没建（理论上不会：BiliFastInit 第一件事就是建它）——
+         * 退化成直接落盘一次，绝不 dispatch_async(NULL)（那是硬崩）。 */
+        if (!gLogQueue) {
+            if (gLogDir) {
+                NSString *p = [gLogDir stringByAppendingPathComponent:kLogName];
+                [line writeToFile:p atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+            }
+            return;
+        }
+
+        /* 调用线程零阻塞：所有实际工作（入缓冲/刷盘）都丢到 gLogQueue 这一个
+         * 串行队列上。串行队列天然互斥，gLogBuf 无需再加锁，也没有嵌套 block。 */
+        dispatch_async(gLogQueue, ^{
             if (!gLogBuf) gLogBuf = [NSMutableArray arrayWithCapacity:64];
             [gLogBuf addObject:d];
-            /* 攒够 N 行或字节量再刷盘，避免每行一次 open/close；
-             * 但 boot/cfg 这类少量日志也尽快落盘（少于阈值时也触发，保证启动日志可见） */
+            /* 攒够 32 行批量刷一次，摊薄 open/close 开销；
+             * 不足则由 1 秒定时器兜底刷（保证启动日志尽快可见）。 */
             if (gLogBuf.count >= 32) {
                 NSMutableArray *snap = gLogBuf;
                 gLogBuf = nil;
-                dispatch_async(gLogQueue, ^{ FLogFlush(snap); });
+                FLogFlush(snap);
             }
         });
     }
@@ -373,10 +383,10 @@ static void BiliFastInit(void)
     @autoreleasepool {
         [BSPProxyServer setLogDirName:kDirName];
 
-        /* 建异步日志队列（见 FLogv 注释：同步写盘是两版卡死的根因） */
+        /* 建异步日志队列（见 FLogv 注释：同步写盘是两版卡死的根因）。
+         * 一个串行队列包办缓冲与写盘，天然互斥。 */
         if (!gLogQueue) {
-            gLogQueue = dispatch_queue_create("bilifast.log.write", DISPATCH_QUEUE_SERIAL);
-            gLogBufQueue = dispatch_queue_create("bilifast.log.buf", DISPATCH_QUEUE_CONCURRENT);
+            gLogQueue = dispatch_queue_create("bilifast.log", DISPATCH_QUEUE_SERIAL);
         }
 
         NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -395,11 +405,14 @@ static void BiliFastInit(void)
             dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
                                      (uint64_t)(1 * NSEC_PER_SEC), (uint64_t)(200 * NSEC_PER_MSEC));
             dispatch_source_set_event_handler(t, ^{
-                NSMutableArray *snap = nil;
-                dispatch_barrier_sync(gLogBufQueue, ^{
-                    if (gLogBuf.count) { snap = gLogBuf; gLogBuf = nil; }
+                /* 取缓冲+刷盘都在 gLogQueue 上做（串行，无需锁，无嵌套 block） */
+                dispatch_async(gLogQueue, ^{
+                    if (gLogBuf.count) {
+                        NSMutableArray *snap = gLogBuf;
+                        gLogBuf = nil;
+                        FLogFlush(snap);
+                    }
                 });
-                if (snap) dispatch_async(gLogQueue, ^{ FLogFlush(snap); });
             });
             dispatch_resume(t);
         });
