@@ -171,7 +171,13 @@
                 break;
         }
         c.textLabel.text = name;
+        /* 单/多 CDN 模式下一台都没勾 = 代码静默退回原始 URL，看起来就是
+         * 「开关没用」。这里直接说破，并提示下一段可以勾。 */
+        if (ip.row != BSPCdnModeFollow && [BSPCdnPool selectedHosts].count == 0) {
+            desc = [desc stringByAppendingString:@"\n⚠ 还没勾 CDN，请在下面「选择 CDN」里勾上，否则等于没切"];
+        }
         c.detailTextLabel.text = desc;
+        c.detailTextLabel.numberOfLines = 3;
         c.accessoryType = ([BSPCdnPool mode] == ip.row)
                             ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         return c;
@@ -235,6 +241,41 @@
     }
 }
 
+/* 切到需要指定 CDN 的模式却没勾任何一台时，自动选上本次实测可用的那些。
+ *
+ * 为什么必须自动选：不选的话 pinnedHost 为 nil，fetchChunk 静默用回原始 URL，
+ * 表面上和「跟随原始 URL」毫无区别 —— 用户看到的就是「开关没用」。
+ * 优先取本次真正成功过、且实测最快的 —— 那是播放器自己挑中的 CDN，最稳。 */
+- (void)autoPickHostsForMode:(BSPCdnMode)mode
+{
+    NSMutableArray<NSDictionary *> *good = [NSMutableArray array];
+    NSMutableArray<NSString *> *sel = [NSMutableArray array];
+    NSString *msg;
+
+    for (NSDictionary *d in self.rows) {
+        if ([d[@"ok"] longLongValue] > 0) [good addObject:d];
+    }
+    [good sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [b[@"speed"] compare:a[@"speed"]];
+    }];
+    for (NSDictionary *d in good) {
+        [sel addObject:d[@"host"]];
+        if (mode == BSPCdnModeSingle || sel.count >= 3) break;   /* 单 CDN 只取一台 */
+    }
+    if (sel.count == 0) {
+        NSArray<NSString *> *cands = [BSPCdnPool pickerCandidates];
+        if (cands.count) [sel addObject:cands.firstObject];
+    }
+    if (sel.count == 0) return;
+
+    [BSPCdnPool setSelectedHosts:sel];
+    msg = [NSString stringWithFormat:@"已自动选中 %@（本次实测可用，可自行增减）",
+           [sel componentsJoinedByString:@", "]];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BiliFastLog"
+                                                        object:nil
+                                                      userInfo:@{@"msg": msg}];
+}
+
 - (void)masterChanged:(UISwitch *)sw
 {
     self.enabled = sw.on;
@@ -266,7 +307,14 @@
     if (ip.section == 1) {
         /* 切换 CDN 使用模式。存 NSUserDefaults，下一个请求就按新模式走，
          * 不需要重启 —— 所以这里只要重画本页。 */
-        [BSPCdnPool setMode:(BSPCdnMode)ip.row];
+        BSPCdnMode m = (BSPCdnMode)ip.row;
+        [BSPCdnPool setMode:m];
+        if (m != BSPCdnModeFollow && [BSPCdnPool selectedHosts].count == 0) {
+            [self autoPickHostsForMode:m];
+        }
+        /* 必须重放到调度器：buildPlanner 只在 start() 里跑过一次，
+         * 不重放的话「多 CDN 多发」会因为候选池是空的而挑不出节点。 */
+        [[BSPProxyServer shared] applyCdnSelection];
         [tv reloadData];
         return;
     }
@@ -276,6 +324,7 @@
         NSArray<NSString *> *cands = [BSPCdnPool pickerCandidates];
         if (ip.row >= (NSInteger)cands.count) return;
         [BSPCdnPool toggleHost:cands[(NSUInteger)ip.row]];
+        [[BSPProxyServer shared] applyCdnSelection];
         [tv reloadData];
         return;
     }
@@ -775,6 +824,30 @@ static void FTeardownOverlay(void)
     /* 不动 gTarget / gGestureWindows：手势还挂在 App 的窗口上，换掉就断了 */
 }
 
+/// 把小球夹回当前屏幕内。
+///
+/// 真机故障：切到播放页（强制横屏）后小球点不动。小球位置存的是**竖屏**坐标下的
+/// 中心点，横屏时屏幕高度变成竖屏的宽度 —— 例如 y = 0.62 * 844 = 523，而横屏
+/// 高度只有 390，小球整个跑到屏幕外，既看不见也点不着。转屏后夹一次即可。
+static void FClampBallToScreen(void)
+{
+    CGSize sz;
+    CGPoint c, n;
+
+    if (!gWin || gPanelBox) return;      /* 面板开着时窗口是全屏，不用管 */
+    sz = gWin.windowScene ? gWin.windowScene.coordinateSpace.bounds.size
+                          : [UIScreen mainScreen].bounds.size;
+    if (sz.width < 1.0 || sz.height < 1.0) return;
+
+    c = gWin.center;
+    n = CGPointMake(MIN(MAX(c.x, 26.0), sz.width  - 26.0),
+                    MIN(MAX(c.y, 48.0), sz.height - 48.0));
+    if (CGPointEqualToPoint(c, n)) return;
+    gWin.center  = n;
+    gBallCenter  = n;
+    FSaveBallCenter(n);
+}
+
 static void FRefreshOverlayForForeground(void)
 {
     UIWindowScene *scene = FActiveWindowScene();
@@ -800,6 +873,7 @@ static void FRefreshOverlayForForeground(void)
     gWin.windowLevel = UIWindowLevelAlert + 10;
     gWin.hidden = !(gBallWanted || gPanelBox);
     if (gPanelBox) FLayoutCard();
+    else           FClampBallToScreen();     /* 期间转过屏的话把小球拉回可见区 */
     FLogLine(@"回到前台：覆盖窗口仍在，已重申层级");
 }
 
@@ -820,6 +894,20 @@ void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
         @catch (NSException *ex) {
             FLogLine([NSString stringWithFormat:@"回到前台处理失败：%@", ex.reason ?: @"?"]);
         }
+    }];
+
+    /* 转屏（播放页会强制横屏）后小球可能落到屏幕外，夹回来。
+     * 延后 0.45s 再做：要等场景的 coordinateSpace 更新到新尺寸。 */
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIDeviceOrientationDidChangeNotification object:nil
+                    queue:[NSOperationQueue mainQueue]
+               usingBlock:^(NSNotification *n) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try { FClampBallToScreen(); }
+            @catch (__unused NSException *e) {}
+        });
     }];
 
     dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuild(); } });

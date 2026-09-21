@@ -481,6 +481,66 @@ static NSSet *kDropReqHeaders(void)
      * BSP_MS_MAX_HOSTS 槽）。单 host 模式不调 pick，空槽不影响调度。 */
 }
 
+/* 把面板里选的 CDN 真正落到调度器上。
+ *
+ * 为什么必须能在运行期调用：buildPlanner 只在 start() 里跑一次。启动时如果是
+ * 「跟随原始 URL」，候选池建出来是空的；用户随后切到「多 CDN 多发」，
+ * multiHostMode 变成 YES 但池里一台 host 都没有 —— 调度器挑不出任何节点，
+ * 用户看到的就是「开关没用」。
+ *
+ * 两个坑：
+ *   1) ensureHost: 自己会加 _lock，所以**绝不能持锁调它**（NSLock 不可重入，
+ *      这正是之前整机卡死的那个坑）。
+ *   2) 不用「清空 _hosts 重建」的办法：在途请求的 ctx.originHostIdx 是 _hosts
+ *      的下标，缩短数组会让 _hosts[idx] 越界崩溃。改成**只改健康位** ——
+ *      选中的置 1、其余置 0，数组只增不减。 */
+- (void)applyCdnSelection
+{
+    NSMutableArray<NSString *> *want = [[BSPCdnPool effectiveHostsForPlanner] mutableCopy];
+    NSMutableIndexSet *keep = [NSMutableIndexSet indexSet];
+    BSPCdnMode m = [BSPCdnPool mode];
+    NSString *modeName;
+    NSUInteger i;
+
+    switch (m) {
+        case BSPCdnModeSingle: modeName = @"单 CDN 多发"; break;
+        case BSPCdnModeMulti:  modeName = @"多 CDN 多发"; break;
+        default:               modeName = @"跟随原始 URL"; break;
+    }
+
+    /* 先登记（ensureHost: 自己加锁，不能持锁调） */
+    for (i = 0; i < want.count; i++) {
+        int idx = [self ensureHost:want[i]];
+        if (idx >= 0) [keep addIndex:(NSUInteger)idx];
+    }
+    if (m == BSPCdnModeSingle) {
+        NSString *pin = [BSPCdnPool pinnedHost];
+        if (pin.length) {
+            int idx = [self ensureHost:pin];
+            if (idx >= 0) [keep addIndex:(NSUInteger)idx];
+        }
+    }
+
+    [_lock lock];
+    {
+        if (_planner) {
+            int n = bsp_ms_host_count(_planner);
+            for (int k = 0; k < n; k++) {
+                BOOL on = [keep containsIndex:(NSUInteger)k];
+                if (m == BSPCdnModeMulti) bsp_ms_set_healthy(_planner, k, on ? 1 : 0);
+                else if (on)             bsp_ms_set_healthy(_planner, k, 1);
+            }
+        }
+    }
+    [_lock unlock];
+
+    PLogProxy(@"CDN 选择已应用：模式 %@；候选 %lu 台%@", modeName,
+              (unsigned long)keep.count,
+              (m == BSPCdnModeMulti || keep.count > 0)
+                  ? @""
+                  : @" —— 一台都没选，会退回原始 URL");
+}
+
 /* URL 的 host 规格（带端口时保留端口，否则主机池与 URL 对不上） */
 - (NSString *)hostSpecOf:(NSString *)urlString
 {

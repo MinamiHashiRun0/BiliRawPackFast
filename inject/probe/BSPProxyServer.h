@@ -54,6 +54,11 @@ NS_ASSUME_NONNULL_BEGIN
 /* 一键把所有候选 CDN 都打开（恢复自动调度） */
 - (void)enableAllHosts;
 
+/* 把 BSPCdnPool 里当前的模式与勾选落到调度器上。
+ * 运行期切换模式/改勾选之后必须调一次 —— buildPlanner 只在 start() 里跑过一次，
+ * 不重放的话「多 CDN 多发」会因为候选池是空的而挑不出节点。 */
+- (void)applyCdnSelection;
+
 /* 改写总开关。true=改写，false=完全不动 URL（播放器直连）。
  * 与启动时读的 mode.txt 是「与」的关系：mode.txt=direct 时此项无效。 */
 @property (nonatomic, assign) BOOL rewriteActive;
