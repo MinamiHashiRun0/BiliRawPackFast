@@ -1850,9 +1850,13 @@ static void ProbeLogRewrite(NSString *tag, NSString *hookKey, NSString *label, N
         gRewriteCounts[hookKey] = @(n.integerValue + 1);
         if ([gRewriteLogged containsObject:orig]) return;
         [gRewriteLogged addObject:orig];
-        PLog(@"rewrite", @"★ [%@] %@ 改写主机 %@ → 127.0.0.1:%u（%.70@…）",
-             label, hookKey, [BSPCdnPool hostOf:orig] ?: @"?",
-             (unsigned)[BSPProxyServer shared].port, orig);
+        // %@ 不支持精度修饰符（-Wformat 会报 error），先自己截断
+        {
+            NSString *brief = orig.length > 70 ? [[orig substringToIndex:70] stringByAppendingString:@"…"] : orig;
+            PLog(@"rewrite", @"★ [%@] %@ 改写主机 %@ → 127.0.0.1:%u（%@）",
+                 label, hookKey, [BSPCdnPool hostOf:orig] ?: @"?",
+                 (unsigned)[BSPProxyServer shared].port, brief);
+        }
     }
 }
 

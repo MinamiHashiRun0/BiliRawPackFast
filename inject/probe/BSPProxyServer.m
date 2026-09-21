@@ -694,10 +694,20 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
 - (void)scheduleMore:(BSPConnContext *)ctx
 {
+    NSInteger window;
     if (!ctx.url || ctx.closed || ctx.failed || ctx.bodyDone) return;
     ctx.schedulePending = NO;
 
-    while (ctx.outstanding < kWindow) {
+    /* 总长未知时把窗口收到 2。
+     *
+     * 为什么必须收：客户端发的是开放式 Range（bytes=N-），我们不知道文件到哪结束。
+     * 如果照常按 16 个分片预取，512 KiB × 16 = 8 MiB 可能直接冲过文件末尾
+     * —— 上游对越界 Range 返回 416，于是分片失败、整个请求 502。
+     * （真机之前没暴露是因为 256 KiB × 12 = 3 MiB 恰好小于常见剩余量。）
+     * 收到第一片的 Content-Range 就能学到总长，之后窗口自动放开。 */
+    window = (ctx.total < 0) ? 2 : kWindow;
+
+    while (ctx.outstanding < window) {
         int64_t s = ctx.nextFetch;
         int64_t e, need;
         double now = bsp_now();
@@ -784,6 +794,29 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         dispatch_async(wc.q, ^{
             NSHTTPURLResponse *hr = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
             NSInteger code = hr ? hr.statusCode : 0;
+
+            /* 416 = 我们请求的范围越过了文件末尾。这不是错误，而是「已经到头了」。
+             * 416 的响应头里带 Content-Range: bytes *\/总长，正好可以补上我们还不知道
+             * 的总长；把这个分片直接丢掉即可（在途槽位归还，写指针靠前一片自然收尾）。
+             * 不做这一步的话，开放式 Range 的请求会因为越界预取而整体 502。 */
+            if (code == 416 && hr) {
+                NSString *cr = hr.allHeaderFields[@"Content-Range"];
+                if ([cr isKindOfClass:[NSString class]]) {
+                    NSRange slash = [cr rangeOfString:@"/"];
+                    if (slash.location != NSNotFound) {
+                        int64_t t = [[cr substringFromIndex:NSMaxRange(slash)] longLongValue];
+                        if (t > 0) {
+                            if (wc.total < 0) wc.total = t;
+                            PLogProxy(@"分片 %lld 越界（416），学到总长 %lld，丢弃该分片",
+                                      (long long)s, (long long)t);
+                            if (wc.outstanding > 0) wc.outstanding--;
+                            [self flushWrites:wc];
+                            [self scheduleMore:wc];
+                            return;
+                        }
+                    }
+                }
+            }
 
             if (err || !data.length || code >= 400 || (code != 200 && code != 206)) {
                 NSString *why = err ? err.localizedDescription
