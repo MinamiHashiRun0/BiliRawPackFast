@@ -384,6 +384,16 @@ static NSSet *kDropReqHeaders(void)
 }
 
 /// 一行式吞吐摘要，供心跳与结论段使用。
+///
+/// 这里刻意给出一个**不需要人来主观判断**的量化指标：并发收益倍数。
+///   分子 = 单个客户端请求里，播放器实际体验到的峰值均速
+///          （代理服务完这一条 Range 的 字节/墙钟时间）
+///   分母 = 本次会话里最快的那台 CDN，单独服务请求时的均速
+/// 两者都是**同一次会话、同一条网络、同一批 CDN** 上测出来的，
+/// 所以比值 > 1 就说明「把一条连接拆到多台 CDN 并发」确实比单台快；
+/// 比值 ≈ 1 说明并发没带来收益（比如瓶颈根本不在单台 CDN 的带宽上）。
+/// 注意它比较的是「经代理」对「单台 CDN」，不是「经代理」对「播放器直连」——
+/// 后者需要关掉改写再跑一遍才能测，属于对照组的事。
 - (NSString *)throughputLine
 {
     NSString *s;
@@ -391,13 +401,30 @@ static NSSet *kDropReqHeaders(void)
     {
         double mib = (double)_servedBytes / 1048576.0;
         double agg = _servedSeconds > 0.05 ? mib / _servedSeconds : 0.0;
+        double bestHost = 0.0;
+        NSString *bestHostName = nil;
+        double gain = 0.0;
+        for (NSString *k in _hostStats) {
+            BSPProxyHostStat *st = _hostStats[k];
+            if (st.bytes <= 0 || st.seconds <= 0.01) continue;
+            {
+                double sp = (double)st.bytes / st.seconds / 1048576.0;
+                if (sp > bestHost) { bestHost = sp; bestHostName = st.host; }
+            }
+        }
+        if (bestHost > 0.001 && _peakMiBps > 0.001) gain = _peakMiBps / bestHost;
+
         s = [NSString stringWithFormat:
              @"代理：请求=%lu 完成=%lu 上游分片=%lu 失败=%lu 302回源=%lu | "
-             @"送达 %.2f MiB 累计均速 %.2f MiB/s 单请求峰值 %.2f MiB/s | 重写URL=%lu",
+             @"送达 %.2f MiB 累计均速 %.2f MiB/s 单请求峰值 %.2f MiB/s | "
+             @"最快单主机 %@ %.2f MiB/s → 并发收益 %.2fx | 重写URL=%lu",
              (unsigned long)_totalRequests, (unsigned long)_completedRequests,
              (unsigned long)_totalChunks, (unsigned long)_failedChunks,
              (unsigned long)_redirects,
-             mib, agg, _peakMiBps, (unsigned long)_rewrittenCount];
+             mib, agg, _peakMiBps,
+             bestHostName ?: @"(尚未测到)", bestHost,
+             gain,
+             (unsigned long)_rewrittenCount];
     }
     [_lock unlock];
     return s;
