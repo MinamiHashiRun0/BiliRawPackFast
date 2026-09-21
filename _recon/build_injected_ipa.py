@@ -108,27 +108,65 @@ def load_injector():
 
 
 def check_dylib_is_current(dylib_path: str) -> bool:
-    """确认 deliver 下的 dylib 就是当前 HEAD 编出来的那个。
+    """确认 deliver 下的 dylib 反映的是**当前源码**。
 
     为什么必须查：本轮就出过事 —— 从 CI 下载了新构建，却忘了复制到 deliver/，
     于是打出来的 IPA 里装的还是**上一版** dylib（没有 4K 修复、没有设置面板），
     而所有校验都是绿的（文件在、路径对、结构合法）。只有哈希对不上，
     但没人会去比对哈希。
-    dylib 里编进了构建时的 git short sha，直接在里面找当前 HEAD 的 sha 即可。
+
+    判定标准不是「sha 等于 HEAD」，而是「dylib 的构建 sha 与 HEAD 之间
+    inject/ 下没有任何差异」—— 后者才真正代表 dylib 是否反映了当前源码。
+    （只改 _recon/ 或文档时不该判定为过期：那种改动不会触发 CI 重建。）
     """
+    import re
     import subprocess
+
+    def git(*args):
+        return subprocess.check_output(["git"] + list(args), cwd=ROOT,
+                                       stderr=subprocess.DEVNULL).decode().strip()
+
     try:
-        head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
-                                       cwd=ROOT, stderr=subprocess.DEVNULL).decode().strip()
+        head = git("rev-parse", "--short", "HEAD")
     except Exception:
         print("  ⚠ 拿不到当前 git HEAD，跳过新鲜度检查")
         return True
+
     blob = open(dylib_path, "rb").read()
-    if head.encode() in blob:
-        print(f"  dylib 新鲜度 ✓（内含当前 HEAD {head}）")
+    # dylib 里编进了构建时的 short sha，找出来（7~40 位十六进制）
+    cands = {m.group(0).decode() for m in re.finditer(rb"\b[0-9a-f]{7,40}\b", blob)}
+    built = None
+    for c in sorted(cands, key=len, reverse=True):
+        try:
+            git("cat-file", "-e", c + "^{commit}")
+            built = c
+            break
+        except Exception:
+            continue
+
+    if not built:
+        print("  ⚠ dylib 里找不到可识别的构建 sha，跳过新鲜度检查")
         return True
-    print(f"  ✗ dylib 里找不到当前 HEAD {head} —— 这很可能是**旧构建**：")
-    print(f"    请先把 CI 产物复制到 deliver/{MODULE}.dylib 再打包。")
+
+    if built == head:
+        print(f"  dylib 新鲜度 ✓（构建于当前 HEAD {head}）")
+        return True
+
+    # 构建 sha 与 HEAD 之间，inject/ 下有没有差异？
+    try:
+        diff = git("diff", "--name-only", built, head, "--", "inject/")
+    except Exception:
+        print(f"  ⚠ 无法比对 {built}..{head}，跳过新鲜度检查")
+        return True
+
+    if not diff:
+        print(f"  dylib 新鲜度 ✓（构建于 {built}；其后 inject/ 无改动）")
+        return True
+
+    print(f"  ✗ dylib 构建于 {built}，但 {built}..{head} 之间 inject/ 有改动：")
+    for line in diff.splitlines()[:8]:
+        print(f"      {line}")
+    print(f"    这是**旧构建**。请先把 CI 产物复制到 deliver/{MODULE}.dylib 再打包。")
     return False
 
 
