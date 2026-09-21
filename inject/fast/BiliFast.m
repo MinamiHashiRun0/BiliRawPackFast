@@ -446,6 +446,13 @@ static void BiliFastInit(void)
                 /* ---- 设置面板：悬浮小球 + 三指双击 ----
                  * 装完就不需要再碰文本文件了。开关立即生效（hook 里读原子量），
                  * CDN 勾选立即生效（改调度器的 healthy 位）。 */
+                [[NSNotificationCenter defaultCenter]
+                    addObserverForName:@"BiliFastLog" object:nil
+                                queue:[NSOperationQueue mainQueue]
+                            usingBlock:^(NSNotification *n) {
+                    NSString *m = n.userInfo[@"msg"];
+                    if (m.length) FLog(@"ui", @"%@", m);
+                }];
                 BiliFastInstallUI(^BOOL { return FEnabled(); },
                                   ^(BOOL on) { FSetEnabled(on); });
 

@@ -90,6 +90,11 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) NSUInteger ok;
 @property (nonatomic, assign) NSUInteger fail;
 @property (nonatomic, assign) double seconds;
+/* 只统计「热连接」样本的字节/耗时。给用户看的均速、以及评分用的基准，
+ * 都应当排除冷连接（含 DNS+TCP+TLS）那一次，否则快的机器会被算成慢的。 */
+@property (nonatomic, assign) int64_t warmBytes;
+@property (nonatomic, assign) double  warmSeconds;
+@property (nonatomic, assign) NSUInteger warmOk;
 @property (nonatomic, assign) NSInteger consecutiveErrors;
 @end
 @implementation BSPProxyHostStat
@@ -157,6 +162,7 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) NSUInteger completedRequests;
 @property (nonatomic, assign) double peakMiBps;
 @property (nonatomic, assign) BOOL anyHostMeasured;   /* 是否已有真实测速样本 */
+@property (nonatomic, strong) NSMutableSet<NSString *> *warmHosts;  /* 已建立过连接的 host */
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, assign) BSPMSPlanner *planner;  /* 全局共享，跨请求学习 */
 @property (nonatomic, strong) NSMutableArray<NSString *> *hosts;
@@ -407,7 +413,11 @@ static NSSet *kDropReqHeaders(void)
     for (NSUInteger i = 0; i < _hosts.count; i++) {
         NSString *h = _hosts[i];
         BSPProxyHostStat *st = _hostStats[h];
-        double speed = (st && st.seconds > 0.05) ? (double)st.bytes / st.seconds / 1048576.0 : 0.0;
+        /* 均速优先用热连接样本（排除 DNS/TCP/TLS 那一次），
+         * 这样面板上显示的「均速」和调度器实际依据的速度是一致的。 */
+        double speed = 0.0;
+        if (st && st.warmSeconds > 0.05)      speed = (double)st.warmBytes / st.warmSeconds / 1048576.0;
+        else if (st && st.seconds > 0.05)     speed = (double)st.bytes / st.seconds / 1048576.0;
         BOOL enabled = _planner ? bsp_ms_is_healthy(_planner, (int)i) : YES;
         [out addObject:@{
             @"host":    h,
@@ -475,12 +485,11 @@ static NSSet *kDropReqHeaders(void)
         double gain = 0.0;
         for (NSString *k in _hostStats) {
             BSPProxyHostStat *st = _hostStats[k];
-            if (st.bytes <= 0 || st.seconds <= 0.05) continue;
-            if (st.ok < 3) continue;              /* 样本太少，不算 */
-            {
-                double sp = (double)st.bytes / st.seconds / 1048576.0;
-                if (sp > bestHost) { bestHost = sp; bestHostName = st.host; }
-            }
+            double sp;
+            /* 用热连接样本，且至少 3 片 —— 样本太少或混着握手时间的数字没有意义 */
+            if (st.warmOk < 3 || st.warmSeconds <= 0.05) continue;
+            sp = (double)st.warmBytes / st.warmSeconds / 1048576.0;
+            if (sp > bestHost) { bestHost = sp; bestHostName = st.host; }
         }
         if (bestHost > 0.001 && aggWall > 0.001) gain = aggWall / bestHost;
 
@@ -887,11 +896,23 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     NSString *upURL = [BSPCdnPool url:ctx.url withHost:host];
     NSMutableURLRequest *r;
     NSTimeInterval t0 = bsp_now();
+    BOOL hostWarm;
     BSPConnContext *wc = ctx;
     int64_t len = e - s + 1;
 
     if (!upURL) { [self chunkFailed:ctx start:s end:e host:host reason:@"URL 拼接失败" retry:retry]; return; }
     if (!_session) { [self chunkFailed:ctx start:s end:e host:host reason:@"session 未就绪" retry:retry]; return; }
+
+    /* 这台 host 是不是第一次用？
+     *
+     * 为什么要区分：`dt` 是从建任务到收完的**整段**时间，头一次访问还要算上
+     * DNS + TCP + TLS，海外到国内这段往往就是几百毫秒。512 KiB 的分片若耗掉
+     * 0.8 秒握手，算出来的速度只有 0.6 MiB/s，而同一台机器热连接时能到 3 MiB/s。
+     * 结果就是「测速最快的那台」和「实际拿到最多分片的那台」对不上 ——
+     * 用户真机上看到 28.5% 那台并不是测速最高的那台，根因就在这里：
+     * 头一次用完就被打上"慢"的标签，后面很难翻身。 */
+    hostWarm = [self isHostWarm:host];
+    if (!hostWarm) [self markHostWarm:host];
 
     r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:upURL]];
     r.HTTPMethod = @"GET";
@@ -942,12 +963,13 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             if (err || !data.length || code >= 400 || (code != 200 && code != 206)) {
                 NSString *why = err ? err.localizedDescription
                                     : [NSString stringWithFormat:@"HTTP %ld", (long)code];
-                [self noteHost:host bytes:0 seconds:dt ok:NO];
+                [self noteHost:host bytes:0 seconds:dt ok:NO warm:NO];
                 [self chunkFailed:wc start:s end:e host:host reason:why retry:retry];
                 return;
             }
 
-            [self noteHost:host bytes:(int64_t)data.length seconds:dt ok:YES];
+            [self noteHost:host bytes:(int64_t)data.length seconds:dt ok:YES warm:hostWarm];
+            [self markHostWarm:host];   /* 这一台的连接已建立，之后的分片就是热连接 */
 
             if (wc.total < 0 && hr) {
                 NSString *cr = hr.allHeaderFields[@"Content-Range"];
@@ -1028,7 +1050,8 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     }
 }
 
-- (void)noteHost:(NSString *)host bytes:(int64_t)bytes seconds:(double)dt ok:(BOOL)ok
+- (void)noteHost:(NSString *)host bytes:(int64_t)bytes seconds:(double)dt
+              ok:(BOOL)ok warm:(BOOL)warm
 {
     [_lock lock];
     {
@@ -1036,11 +1059,60 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         if (ok) {
             s.bytes += bytes; s.seconds += dt; s.ok++; s.consecutiveErrors = 0;
             if (bytes > 0) _anyHostMeasured = YES;   /* 有真实测速样本了 */
+            if (warm && bytes > 0) { s.warmBytes += bytes; s.warmSeconds += dt; s.warmOk++; }
         } else {
             s.fail++; s.consecutiveErrors++;
         }
     }
+    /* ★ 关键：成功也必须配对地 finish 一次。
+     *
+     * 这里曾经漏了整整一个版本：bsp_ms_begin 每次派发都 +1，而 bsp_ms_finish
+     * 只在失败路径调用过 —— **在途计数只增不减**。后果很隐蔽：
+     *   · load_factor = 1/(1+active) 对所有主机一起衰减到接近 0，
+     *     评分之间的比例被压平，分配变得近乎随机
+     *     —— 用户真机上就是「拿到最多分片的那台并不是测速最快的那台」
+     *   · pick_capped 的「在途≥4 就跳过」会永久排除所有主机，上限形同虚设
+     * 冷连接样本（含 DNS+TCP+TLS）不进速度窗口，理由见 fetchChunk 里的注释。 */
+    if (ok && warm && bytes > 0 && dt > 0.005) {
+        int idx;
+        [_lock lock];
+        idx = [self hostIndexOfLocked:host];
+        if (idx >= 0 && _planner) bsp_ms_finish(_planner, idx, bytes, dt, 0);
+        [_lock unlock];
+    } else {
+        int idx;
+        [_lock lock];
+        idx = [self hostIndexOfLocked:host];
+        /* 即使样本不入窗口，也必须把在途数减回去 */
+        if (idx >= 0 && _planner) bsp_ms_finish(_planner, idx, 0, 0, 0);
+        [_lock unlock];
+    }
+}
+
+- (BOOL)isHostWarm:(NSString *)host
+{
+    BOOL w;
+    if (!host.length) return NO;
+    [_lock lock];
+    w = [_warmHosts containsObject:host];
     [_lock unlock];
+    return w;
+}
+
+- (void)markHostWarm:(NSString *)host
+{
+    if (!host.length) return;
+    [_lock lock];
+    if (!_warmHosts) _warmHosts = [NSMutableSet set];
+    [_warmHosts addObject:host];
+    [_lock unlock];
+}
+
+/// 已持有 _lock 时用，避免 NSLock 不可重入导致死锁
+- (int)hostIndexOfLocked:(NSString *)host
+{
+    NSNumber *n = _hostIndex[host];
+    return n ? n.intValue : -1;
 }
 
 - (int)hostIndexOf:(NSString *)host

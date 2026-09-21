@@ -8,14 +8,15 @@
 // 交互（尽量不干扰 App 本身）：
 //   * 悬浮小球（可拖动、半透明、记住位置）→ 点一下打开面板
 //   * 三指双击屏幕任意位置 → 同样打开面板（小球被隐藏时的入口）
-//   * 透明窗口的 hitTest 只认「小球」与「面板」，其余位置一律放行给 App，
-//     所以不会挡住任何正常操作
 //
-// 两个容易踩的坑，这里都处理了：
+// 三个容易踩的坑，这里都处理了：
 //   1. iOS 13+ 手工创建的 UIWindow 若不设 windowScene，**根本不会显示**。
 //      启动时场景往往还没就绪，所以这里轮询等场景出现再建窗口。
 //   2. 手势/按钮回调不用分类（category）承载 —— 那会引入「先 @selector 后声明」
 //      的顺序问题；改用一个 target 对象，干净且不会有警告。
+//   3. 小球窗口**只有小球那么大**，三指手势挂在 App 自己的 key window 上，
+//      面板从 App 最顶层 VC 弹出。详见下面「入口」一节的说明 ——
+//      这三条都是被真机故障逼出来的。
 //==============================================================================
 
 #import <Foundation/Foundation.h>
@@ -26,23 +27,6 @@
 #import "BiliFastUI.h"
 
 static _Atomic(BOOL) gInstalled;
-
-//------------------------------------------------------------------------------
-#pragma mark - 悬浮窗：只有小球与面板接管触摸
-//------------------------------------------------------------------------------
-@interface BiliFastWindow : UIWindow
-@end
-
-@implementation BiliFastWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event
-{
-    UIView *v = [super hitTest:point withEvent:event];
-    /* 根视图（透明底板）本身不接管触摸 —— 否则整块屏幕都被我们吃掉，
-     * App 就点不动了。只有小球和面板里的子视图会被返回。 */
-    if (v == self.rootViewController.view) return nil;
-    return v;
-}
-@end
 
 //------------------------------------------------------------------------------
 #pragma mark - 设置面板
@@ -79,7 +63,14 @@ static _Atomic(BOOL) gInstalled;
     if (!self.rows) [self reloadRows];
 }
 
-- (void)done { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)done
+{
+    [self dismissViewControllerAnimated:YES completion:^{
+        /* 通知外面复位「已弹出」标志，否则第二次就打不开了 */
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"BiliFastPanelClosed"
+                                                            object:nil];
+    }];
+}
 
 - (void)reloadRows
 {
@@ -221,175 +212,315 @@ static _Atomic(BOOL) gInstalled;
 
 @end
 
+
 //------------------------------------------------------------------------------
-#pragma mark - 入口（小球 / 手势 / 面板）
+#pragma mark - 入口（小球 / 三指手势 / 面板）
 //------------------------------------------------------------------------------
-static BiliFastWindow *gWindow;
-static BiliFastPanel  *gPanel;
-static UIButton       *gBall;
-static BOOL            gBallWanted = YES;
+// 设计要点（都是踩过坑之后改的）：
+//
+// 1. 小球窗口**只有小球那么大**，不再是一个全屏透明窗口。
+//    上一版用了全屏窗口 + hitTest 对根视图返回 nil，想做到「不挡 App」。
+//    结果三指手势挂在那个窗口上，而 hitTest 返回 nil 意味着触摸被交给下面的
+//    App 窗口 —— **手势识别器根本收不到触摸**（它只能收到命中测试落在自己
+//    或自己子视图上的触摸）。所以「非主页三指双击无效」是必然的。
+//    小球窗口做小之后完全不需要 hitTest 作弊：窗口本身就不挡任何别的位置。
+//
+// 2. 三指双击挂到**App 自己的 key window** 上。窗口是命中测试的根，
+//    App 里任何位置的触摸都会经过它的手势识别器，所以到处都有效。
+//    key window 会随 App 切页面/切场景而变化，因此监听 UIWindowDidBecomeKey
+//    动态补挂（用一个集合避免重复挂）。
+//
+// 3. 面板从 **App 最顶层的 VC** 弹出，不从我们自己的窗口根视图弹 ——
+//    后者的 view 不在 App 的窗口层级里，present 会直接抛
+//    「whose view is not in the window hierarchy」而崩掉。
+//    这也是「主页三指双击闪退」的直接原因。
+//
+// 4. 全部包 @try/@catch 并加重复弹出保护：这个模块最不该做的事就是把用户的
+//    App 搞崩。宁可面板打不开，也不能闪退。
+
+static UIWindow      *gBallWindow;
+static BiliFastPanel *gPanel;
+static UIButton      *gBall;
+static BOOL           gBallWanted = YES;
+static BOOL           gPanelPresented;
 static BOOL (^gIsEnabled)(void);
 static void (^gSetEnabled)(BOOL);
+static NSHashTable   *gGestureWindows;
 
-static void FSaveBallPos(CGPoint c)
+static void FLogLine(NSString *s);
+
+static NSString *FBallFrameKey(void) { return @"BiliFastBallFrame"; }
+
+static void FSaveBallCenter(CGPoint c)
 {
-    [[NSUserDefaults standardUserDefaults] setObject:@[@(c.x), @(c.y)] forKey:@"BiliFastBallPos"];
+    [[NSUserDefaults standardUserDefaults] setObject:@[@(c.x), @(c.y)] forKey:FBallFrameKey()];
 }
-static CGPoint FLoadBallPos(void)
+static CGPoint FLoadBallCenter(void)
 {
-    NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:@"BiliFastBallPos"];
+    NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:FBallFrameKey()];
     if (a.count == 2) return CGPointMake([a[0] doubleValue], [a[1] doubleValue]);
     return CGPointZero;
 }
 
+/// App 最顶层的、可以拿来 present 的 VC
+static UIViewController *FTopViewController(void)
+{
+    UIWindow *key = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            if (w.isKeyWindow) { key = w; break; }
+        }
+        if (key) break;
+    }
+    if (!key) {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                if (!w.hidden && w.windowLevel == UIWindowLevelNormal) { key = w; break; }
+            }
+            if (key) break;
+        }
+    }
+    if (!key) key = UIApplication.sharedApplication.keyWindow;
+    if (!key) return nil;
+
+    UIViewController *vc = key.rootViewController;
+    for (int guard = 0; vc && guard < 12; guard++) {
+        if (vc.presentedViewController) { vc = vc.presentedViewController; continue; }
+        if ([vc isKindOfClass:[UINavigationController class]]) {
+            UIViewController *v = [(UINavigationController *)vc visibleViewController];
+            if (v && v != vc) { vc = v; continue; }
+        }
+        if ([vc isKindOfClass:[UITabBarController class]]) {
+            UIViewController *v = [(UITabBarController *)vc selectedViewController];
+            if (v && v != vc) { vc = v; continue; }
+        }
+        break;
+    }
+    return vc;
+}
+
+/// 弹出设置面板。任何一个环节不对就安静地放弃（记一行日志），绝不抛异常出去。
 static void FPresentPanel(void)
 {
-    UIViewController *top = gWindow.rootViewController;
-    while (top.presentedViewController) top = top.presentedViewController;
-    if ([top isKindOfClass:[UINavigationController class]] &&
-        [(UINavigationController *)top topViewController] == gPanel) return;
-
+    if (gPanelPresented) return;
+    UIViewController *top = FTopViewController();
+    if (!top || !top.view.window) {
+        FLogLine(@"面板打不开：找不到可用的顶层视图（App 可能还没进入前台）");
+        return;
+    }
     gPanel.enabled   = gIsEnabled ? gIsEnabled() : YES;
     gPanel.ballShown = gBallWanted;
     [gPanel reloadRows];
-    [top presentViewController:[[UINavigationController alloc] initWithRootViewController:gPanel]
-                      animated:YES completion:nil];
+    gPanelPresented = YES;
+    @try {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:gPanel];
+        nav.modalPresentationStyle = UIModalPresentationFormSheet;
+        [top presentViewController:nav animated:YES completion:nil];
+    } @catch (NSException *ex) {
+        gPanelPresented = NO;
+        FLogLine([NSString stringWithFormat:@"面板弹出失败：%@ — %@", ex.name, ex.reason]);
+    }
 }
 
 void BiliFastShowSettings(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{ if (gWindow) FPresentPanel(); });
+    dispatch_async(dispatch_get_main_queue(), ^{ FPresentPanel(); });
 }
 
 void BiliFastSetBallVisible(BOOL visible)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
         gBallWanted = visible;
-        gBall.hidden = !visible;
+        gBallWindow.hidden = !visible;
         [[NSUserDefaults standardUserDefaults] setBool:visible forKey:@"BiliFastBallVisible"];
     });
 }
 
-/// 小球与手势的统一回调目标（不用分类，避免 @selector 顺序问题）
+//------------------------------------------------------------------------------
+#pragma mark - 小球与手势的回调目标
+//------------------------------------------------------------------------------
 @interface BiliFastBallTarget : NSObject
 @end
 
 @implementation BiliFastBallTarget
 - (void)tapped { FPresentPanel(); }
+
 - (void)threeFingerDoubleTap { FPresentPanel(); }
+
 - (void)panned:(UIPanGestureRecognizer *)g
 {
-    UIView *host = g.view.superview ?: gWindow;
-    CGPoint p = [g translationInView:host];
-    g.view.center = CGPointMake(g.view.center.x + p.x, g.view.center.y + p.y);
-    [g setTranslation:CGPointZero inView:host];
+    UIWindow *win = gBallWindow;
+    if (!win) return;
+    CGPoint p = [g translationInView:win];
+    CGPoint c = CGPointMake(win.center.x + p.x, win.center.y + p.y);
+    [g setTranslation:CGPointZero inView:win];
     {
-        CGSize sz = host.bounds.size;
-        g.view.center = CGPointMake(MIN(MAX(g.view.center.x, 26), sz.width - 26),
-                                    MIN(MAX(g.view.center.y, 48), sz.height - 48));
+        /* 夹在屏幕内（用窗口所在场景的坐标空间，取屏幕尺寸足够） */
+        CGSize sz = [UIScreen mainScreen].bounds.size;
+        c.x = MIN(MAX(c.x, 26), sz.width - 26);
+        c.y = MIN(MAX(c.y, 48), sz.height - 48);
     }
-    if (g.state == UIGestureRecognizerStateEnded) FSaveBallPos(g.view.center);
+    win.center = c;
+    if (g.state == UIGestureRecognizerStateEnded) FSaveBallCenter(c);
 }
 @end
 
 static BiliFastBallTarget *gTarget;
 
-static void FBuildWindow(void)
+//------------------------------------------------------------------------------
+#pragma mark - 组装
+//------------------------------------------------------------------------------
+static UIWindowScene *FActiveWindowScene(void)
 {
-    if (gWindow) return;
-
-    /* iOS 13+ 必须给手工创建的窗口指定 windowScene，否则它根本不会显示。
-     * 启动早期场景常常还没就绪，所以先用轮询等它出现。 */
-    UIWindowScene *scene = nil;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if ([s isKindOfClass:[UIWindowScene class]] &&
             s.activationState != UISceneActivationStateUnattached) {
-            scene = (UIWindowScene *)s;
-            break;
+            return (UIWindowScene *)s;
         }
     }
+    return nil;
+}
+
+/// 给一个 App 窗口挂三指双击（同一个窗口只挂一次）
+static void FAttachGesture(UIWindow *w)
+{
+    if (!w || !gTarget) return;
+    if (!gGestureWindows) gGestureWindows = [NSHashTable weakObjectsHashTable];
+    @synchronized (gGestureWindows) {
+        if ([gGestureWindows containsObject:w]) return;
+        [gGestureWindows addObject:w];
+    }
+    @try {
+        UITapGestureRecognizer *tap =
+            [[UITapGestureRecognizer alloc] initWithTarget:gTarget
+                                                    action:@selector(threeFingerDoubleTap)];
+        tap.numberOfTouchesRequired = 3;
+        tap.numberOfTapsRequired = 2;
+        tap.cancelsTouchesInView = NO;   /* 不干扰 App 自己的手势 */
+        tap.delaysTouchesEnded = NO;
+        [w addGestureRecognizer:tap];
+    } @catch (__unused NSException *e) {}
+}
+
+/// 监听 key window 变化，动态补挂
+static void FObserveKeyWindows(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserverForName:UIWindowDidBecomeKeyNotification object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
+            if ([n.object isKindOfClass:[UIWindow class]]) {
+                UIWindow *w = (UIWindow *)n.object;
+                if (w != gBallWindow) FAttachGesture(w);
+            }
+        }];
+        /* 也覆盖 App 刚起来那一刻已经存在的窗口 */
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)s).windows) FAttachGesture(w);
+        }
+    });
+}
+
+static void FLogLine(NSString *s)
+{
+    /* 走 BiliFast.m 里的文件日志（通过一条通知解耦，避免这里直接依赖它） */
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BiliFastLog"
+                                                        object:nil userInfo:@{@"msg": s ?: @""}];
+}
+
+static void FBuildBall(void)
+{
+    if (gBallWindow) return;
+
+    UIWindowScene *scene = FActiveWindowScene();
+    if (!scene) return;   /* 场景没就绪，外面会重试 */
 
     gTarget = [[BiliFastBallTarget alloc] init];
     gPanel  = [[BiliFastPanel alloc] init];
     gPanel.onToggle = ^(BOOL on) { if (gSetEnabled) gSetEnabled(on); };
     gPanel.onToggleBall = ^(BOOL show) { BiliFastSetBallVisible(show); };
 
-    gWindow = [[BiliFastWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    if (scene) gWindow.windowScene = scene;
-    gWindow.windowLevel = UIWindowLevelAlert + 1;
-    gWindow.backgroundColor = [UIColor clearColor];
-    gWindow.rootViewController = [[UIViewController alloc] init];
-    gWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-    gWindow.hidden = NO;
-
-    /* 悬浮小球 */
+    /* 小球窗口：只有 46x46 —— 本就不挡别的位置，不需要 hitTest 作弊 */
     {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.frame = CGRectMake(0, 0, 46, 46);
         b.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.62];
         b.layer.cornerRadius = 23;
         b.layer.borderWidth = 1.5;
-        b.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.8].CGColor;
+        b.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.85].CGColor;
         b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
         [b setTitle:@"加速" forState:UIControlStateNormal];
         [b addTarget:gTarget action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
         [b addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:gTarget
                                                                        action:@selector(panned:)]];
-        {
-            CGPoint saved = FLoadBallPos();
-            if (CGPointEqualToPoint(saved, CGPointZero)) {
-                CGSize sz = [UIScreen mainScreen].bounds.size;
-                saved = CGPointMake(sz.width - 60, sz.height * 0.62);
-            }
-            b.center = saved;
-        }
-        [gWindow addSubview:b];
         gBall = b;
     }
 
-    /* 三指双击：小球被隐藏后的入口 */
+    gBallWindow = [[UIWindow alloc] initWithFrame:gBall.bounds];
+    gBallWindow.windowScene = scene;              /* iOS 13+ 不设它窗口根本不显示 */
+    gBallWindow.windowLevel = UIWindowLevelAlert + 1;
+    gBallWindow.backgroundColor = [UIColor clearColor];
+    gBallWindow.rootViewController = [[UIViewController alloc] init];
+    gBallWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
+    [gBallWindow.rootViewController.view addSubview:gBall];
     {
-        UITapGestureRecognizer *tap =
-            [[UITapGestureRecognizer alloc] initWithTarget:gTarget
-                                                    action:@selector(threeFingerDoubleTap)];
-        tap.numberOfTouchesRequired = 3;
-        tap.numberOfTapsRequired = 2;
-        tap.cancelsTouchesInView = NO;
-        [gWindow addGestureRecognizer:tap];
+        CGPoint saved = FLoadBallCenter();
+        if (CGPointEqualToPoint(saved, CGPointZero)) {
+            CGSize sz = [UIScreen mainScreen].bounds.size;
+            saved = CGPointMake(sz.width - 44, sz.height * 0.62);
+        }
+        gBallWindow.center = saved;
     }
-
     gBallWanted = [[NSUserDefaults standardUserDefaults] objectForKey:@"BiliFastBallVisible"]
                     ? [[NSUserDefaults standardUserDefaults] boolForKey:@"BiliFastBallVisible"]
                     : YES;
-    gBall.hidden = !gBallWanted;
+    gBallWindow.hidden = !gBallWanted;
 
-    gPanel.enabled   = gIsEnabled ? gIsEnabled() : YES;
-    gPanel.ballShown = gBallWanted;
-    [gPanel reloadRows];
+    FObserveKeyWindows();
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            if (w != gBallWindow) FAttachGesture(w);
+        }
+    }
 }
 
-/* 等 windowScene 就绪再建窗口。
- * 用普通 C 函数递归调度，不用 __block 块自引用 —— 那在 ARC 下会被判为
- * 强捕获自身（-Warc-retain-cycles），而且确实会造成循环引用。 */
 static int gBuildTries = 0;
-static void FTryBuildWindow(void)
+static void FTryBuild(void)
 {
-    BOOL hasScene = NO;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) { hasScene = YES; break; }
+    if (gBallWindow) return;
+    if (FActiveWindowScene() || ++gBuildTries > 24) {
+        @try { FBuildBall(); }
+        @catch (NSException *ex) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"BiliFastLog"
+                object:nil userInfo:@{@"msg": [NSString stringWithFormat:@"界面初始化失败：%@", ex.reason ?: @"?"]}];
+        }
+        if (gBallWindow || gBuildTries > 24) return;
     }
-    if (hasScene || ++gBuildTries > 20) { FBuildWindow(); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ FTryBuildWindow(); });
+                   dispatch_get_main_queue(), ^{ FTryBuild(); });
 }
 
 void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
 {
     BOOL expected = NO;
-    if (!atomic_compare_exchange_strong(&gInstalled, &expected, YES)) return;
+    static _Atomic(BOOL) installed;
+    if (!atomic_compare_exchange_strong(&installed, &expected, YES)) return;
 
     gIsEnabled  = [isEnabled copy];
     gSetEnabled = [setEnabled copy];
 
-    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuildWindow(); } });
+    /* 面板关闭后要复位「已弹出」标志，否则第二次打不开 */
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"BiliFastPanelClosed"
+                                                      object:nil queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *n) {
+        gPanelPresented = NO;
+    }];
+
+    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuild(); } });
 }
