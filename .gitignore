@@ -50,3 +50,6 @@ _biliprobe7/
 _biliprobe8/
 biliprobe/
 
+
+# 真机回传的单文件日志
+trace.log
