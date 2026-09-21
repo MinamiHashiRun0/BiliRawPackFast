@@ -2041,15 +2041,24 @@ static void ProbeDescribeUnhandledArg(NSInvocation *inv, NSUInteger idx,
     if ([obj isKindOfClass:NSArray.class]) {
         NSArray *a = obj;
         NSMutableString *d = [NSMutableString string];
-        for (NSUInteger i = 0; i < a.count && i < 6; i++)
-            [d appendFormat:@"\n        [%lu] <%@> %.160@", (unsigned long)i,
-             NSStringFromClass([a[i] class]), [a[i] description]];
+        for (NSUInteger i = 0; i < a.count && i < 6; i++) {
+            // 注意：%@ 不支持精度修饰符（appendFormat: 有格式检查，会报 -Wformat error），
+            // 这里自己截断。PLog 那边没做格式注解所以 %.400@ 能过，但同样不规范。
+            NSString *desc = [a[i] description] ?: @"";
+            if (desc.length > 160) desc = [[desc substringToIndex:160] stringByAppendingString:@"…"];
+            [d appendFormat:@"\n        [%lu] <%@> %@", (unsigned long)i,
+             NSStringFromClass([a[i] class]), desc];
+        }
         PLog(@"rewrite", @"· [%@] %@ 收到的是数组（%lu 项），不是 URL：%@",
              label, hookKey, (unsigned long)a.count, d);
         return;
     }
-    PLog(@"rewrite", @"· [%@] %@ 收到的是 <%@>，不是 URL：%.240@",
-         label, hookKey, NSStringFromClass([obj class]), [obj description]);
+    {
+        NSString *desc = [obj description] ?: @"";
+        if (desc.length > 240) desc = [[desc substringToIndex:240] stringByAppendingString:@"…"];
+        PLog(@"rewrite", @"· [%@] %@ 收到的是 <%@>，不是 URL：%@",
+             label, hookKey, NSStringFromClass([obj class]), desc);
+    }
 }
 
 /// 若字符串是 B 站媒体 URL，返回应替换成的等价对象（保持原类型）
