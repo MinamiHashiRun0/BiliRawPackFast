@@ -107,6 +107,31 @@ def load_injector():
     return mod
 
 
+def check_dylib_is_current(dylib_path: str) -> bool:
+    """确认 deliver 下的 dylib 就是当前 HEAD 编出来的那个。
+
+    为什么必须查：本轮就出过事 —— 从 CI 下载了新构建，却忘了复制到 deliver/，
+    于是打出来的 IPA 里装的还是**上一版** dylib（没有 4K 修复、没有设置面板），
+    而所有校验都是绿的（文件在、路径对、结构合法）。只有哈希对不上，
+    但没人会去比对哈希。
+    dylib 里编进了构建时的 git short sha，直接在里面找当前 HEAD 的 sha 即可。
+    """
+    import subprocess
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                       cwd=ROOT, stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        print("  ⚠ 拿不到当前 git HEAD，跳过新鲜度检查")
+        return True
+    blob = open(dylib_path, "rb").read()
+    if head.encode() in blob:
+        print(f"  dylib 新鲜度 ✓（内含当前 HEAD {head}）")
+        return True
+    print(f"  ✗ dylib 里找不到当前 HEAD {head} —— 这很可能是**旧构建**：")
+    print(f"    请先把 CI 产物复制到 deliver/{MODULE}.dylib 再打包。")
+    return False
+
+
 def main():
     for p, what in ((IPA, "脱壳 IPA"), (DYLIB, MODULE + ".dylib")):
         if not os.path.exists(p):
@@ -116,6 +141,8 @@ def main():
     inj = load_injector()
     print(f"源 IPA     : {os.path.getsize(IPA):,} 字节")
     print(f"待注入 dylib: {os.path.getsize(DYLIB):,} 字节")
+    if not check_dylib_is_current(DYLIB):
+        return 1
 
     tmp = tempfile.mkdtemp(prefix="biliinject_")
     try:
