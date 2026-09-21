@@ -1233,19 +1233,24 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 - (void)benchSerial:(NSArray<NSArray *> *)jobs
                   i:(NSInteger)i
               bytes:(int64_t)bytes
+                 ok:(NSInteger)ok
                 t0:(NSTimeInterval)t0
              finish:(void (^)(double secs, int64_t bytes, NSInteger okCount))finish
 {
     if (i >= (NSInteger)jobs.count) {
-        finish(bsp_now() - t0, bytes, 0);
+        /* 这里曾经把 ok 写死成 0，于是 A/B 日志里串行那一侧永远显示「成功0」，
+         * 看着像整段失败——其实字节数是真实传完的（2097152 B）。计数补上，
+         * 免得每次看日志都要先怀疑一遍数据是不是废的。 */
+        finish(bsp_now() - t0, bytes, ok);
         return;
     }
     {
         NSArray *j = jobs[(NSUInteger)i];
         [self benchFetchURL:_benchURL host:j[0]
                       start:[j[1] longLongValue] end:[j[2] longLongValue]
-                       done:^(int64_t b, BOOL ok) {
-            [self benchSerial:jobs i:i + 1 bytes:bytes + b t0:t0 finish:finish];
+                       done:^(int64_t b, BOOL okOne) {
+            [self benchSerial:jobs i:i + 1 bytes:bytes + b ok:ok + (okOne ? 1 : 0)
+                           t0:t0 finish:finish];
         }];
     }
 }
@@ -1336,7 +1341,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
     {
         NSTimeInterval a0 = bsp_now();
-        [self benchSerial:serialJobs i:0 bytes:0 t0:a0
+        [self benchSerial:serialJobs i:0 bytes:0 ok:0 t0:a0
                    finish:^(double secsA, int64_t bytesA, NSInteger okA) {
             double mbpsA = secsA > 0.05 ? (double)bytesA / secsA / 1048576.0 : 0.0;
             NSTimeInterval b0 = bsp_now();

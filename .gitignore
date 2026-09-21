@@ -53,3 +53,11 @@ biliprobe/
 
 # 真机回传的单文件日志
 trace.log
+
+# 真机回传的 BiliFast 日志 / 报告 / 压缩包（用户数据，不入库）
+/BiliFast*.log
+/BiliFast*.zip
+/report*.txt
+
+# 从 CI 下载 artifact 的临时解包目录
+/_dl_*/

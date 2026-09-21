@@ -1,236 +1,19 @@
-//==============================================================================
-// BiliFastUI —— 应用内设置面板
-//
-// 为什么要有它：之前只能靠编辑 Documents/BiliFast/mode.txt 与 hosts.txt 来开关
-// 和选节点，这对日常使用完全不合适。正式模块应该有能点开、能勾选、改完立刻
-// 生效的界面。
-//
-// 交互（尽量不干扰 App 本身）：
-//   * 悬浮小球（可拖动、半透明、记住位置）→ 点一下打开面板
-//   * 三指双击屏幕任意位置 → 同样打开面板（小球被隐藏时的入口）
-//
-// 三个容易踩的坑，这里都处理了：
-//   1. iOS 13+ 手工创建的 UIWindow 若不设 windowScene，**根本不会显示**。
-//      启动时场景往往还没就绪，所以这里轮询等场景出现再建窗口。
-//   2. 手势/按钮回调不用分类（category）承载 —— 那会引入「先 @selector 后声明」
-//      的顺序问题；改用一个 target 对象，干净且不会有警告。
-//   3. 小球窗口**只有小球那么大**，三指手势挂在 App 自己的 key window 上，
-//      面板从 App 最顶层 VC 弹出。详见下面「入口」一节的说明 ——
-//      这三条都是被真机故障逼出来的。
-//==============================================================================
+# -*- coding: utf-8 -*-
+"""把 BiliFastUI.m 的「入口」一节整体替换成覆盖窗口方案。
 
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#include <stdatomic.h>
+原方案用 presentViewController 从 B 站自己的 VC 层级弹面板 —— 真机结果是
+一块黑屏且打不开。新方案把面板做成我们自己覆盖窗口里的子视图，没有
+present/dismiss 状态机，也就没有那一类失败模式。
+"""
+import io
+import os
 
-#import "BSPProxyServer.h"
-#import "BSPCdnPool.h"
-#import "BiliFastUI.h"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+P = os.path.join(ROOT, 'inject', 'fast', 'BiliFastUI.m')
 
-//------------------------------------------------------------------------------
-#pragma mark - 设置面板
-//------------------------------------------------------------------------------
-@interface BiliFastPanel : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, copy)   void (^onToggle)(BOOL on);
-@property (nonatomic, copy)   void (^onToggleBall)(BOOL show);
-@property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *rows;
-@property (nonatomic, strong) UITableView *table;
-@property (nonatomic, assign) BOOL enabled;
-@property (nonatomic, assign) BOOL ballShown;
-@end
+MARK = u'#pragma mark - 入口（小球 / 三指手势 / 面板）'
 
-@implementation BiliFastPanel
-
-- (void)viewDidLoad
-{
-    [super viewDidLoad];
-    self.title = @"BiliFast 设置";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-
-    self.table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
-    self.table.dataSource = self;
-    self.table.delegate = self;
-    self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:self.table];
-
-    /* 没有 navigationItem：面板不再是 modal，也没有 UINavigationController。
-     * 标题与「完成/刷新」由覆盖窗口自带的顶栏负责（见文件末尾 FOpenPanel）。
-     * 旧版把复位「已弹出」标志写在 -done 里，而 FormSheet 还能下滑关闭 ——
-     * 滑掉一次面板就永久打不开了，这也是换掉 modal 方案的原因之一。 */
-    if (!self.rows) [self reloadRows];
-}
-
-- (void)reloadRows
-{
-    NSArray<NSDictionary *> *snap = [[BSPProxyServer shared] hostSnapshot];
-    self.rows = [NSMutableArray array];
-    for (NSDictionary *d in snap) [self.rows addObject:[d mutableCopy]];
-    [self.table reloadData];
-}
-
-- (NSUInteger)selectedCount
-{
-    NSUInteger n = 0;
-    for (NSDictionary *d in self.rows) if ([d[@"enabled"] boolValue]) n++;
-    return n;
-}
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
-
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s
-{
-    if (s == 0) return @"并发加速";
-    if (s == 1) {
-        if ([BSPCdnPool multiHostMode]) {
-            return [NSString stringWithFormat:@"CDN 节点（已选 %lu / %lu）",
-                    (unsigned long)[self selectedCount], (unsigned long)self.rows.count];
-        }
-        /* 单 host 模式：节点是动态的（每个视频的原始 host），不是可选候选池 */
-        return @"当前 CDN（单 host 多连接模式）";
-    }
-    return @"指标与说明";
-}
-
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s
-{
-    if (s == 0) return 2;                        /* 总开关 + 悬浮球 */
-    if (s == 1) return (NSInteger)self.rows.count;
-    /* 单 host 模式不需要「全部启用」（只有一个动态节点）：指标 + 说明 = 2 行
-     * 多 host 模式保留「全部启用」：指标 + 全部启用 + 说明 = 3 行 */
-    return [BSPCdnPool multiHostMode] ? 3 : 2;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip
-{
-    UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
-                                               reuseIdentifier:nil];
-    c.detailTextLabel.numberOfLines = 2;
-    c.detailTextLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular];
-
-    if (ip.section == 0) {
-        UISwitch *sw = [[UISwitch alloc] init];
-        if (ip.row == 0) {
-            c.textLabel.text = @"启用并发加速";
-            sw.on = self.enabled;
-            [sw addTarget:self action:@selector(masterChanged:)
-        forControlEvents:UIControlEventValueChanged];
-            c.accessoryView = sw;
-            c.selectionStyle = UITableViewCellSelectionStyleNone;
-            c.detailTextLabel.numberOfLines = 3;
-            c.detailTextLabel.text = self.enabled
-                ? @"已开启：视频地址改写到本机代理，由代理并发取数\n改动立即生效"
-                : @"已关闭：完全不动 URL，播放器直连 CDN";
-        } else {
-            c.textLabel.text = @"显示悬浮小球";
-            sw.on = self.ballShown;
-            [sw addTarget:self action:@selector(ballChanged:)
-        forControlEvents:UIControlEventValueChanged];
-            c.accessoryView = sw;
-            c.selectionStyle = UITableViewCellSelectionStyleNone;
-            c.detailTextLabel.text = @"关掉后：三指双击屏幕任意位置仍可打开本面板";
-        }
-        return c;
-    }
-
-    if (ip.section == 1) {
-        NSDictionary *d = self.rows[(NSUInteger)ip.row];
-        BOOL on = [d[@"enabled"] boolValue];
-        long long ok = [d[@"ok"] longLongValue];
-        long long fail = [d[@"fail"] longLongValue];
-        double speed = [d[@"speed"] doubleValue];
-        c.textLabel.text = d[@"host"];
-        c.textLabel.adjustsFontSizeToFitWidth = YES;
-        c.textLabel.minimumScaleFactor = 0.65;
-        c.detailTextLabel.text = [NSString stringWithFormat:@"均速 %.2f MiB/s   成功 %lld   失败 %lld",
-                                  speed, ok, fail];
-        /* 单 host 模式：不可勾选，无 checkmark、不可点。多 host 模式才显示勾选态 */
-        c.accessoryType = [BSPCdnPool multiHostMode]
-                            ? (on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone)
-                            : UITableViewCellAccessoryNone;
-        c.selectionStyle = [BSPCdnPool multiHostMode]
-                             ? UITableViewCellSelectionStyleDefault
-                             : UITableViewCellSelectionStyleNone;
-        /* 试过但一次都没成的节点标红：一眼看出该关谁 */
-        if (fail > 0 && ok == 0) c.detailTextLabel.textColor = [UIColor systemRedColor];
-        else if (ok > 0)         c.detailTextLabel.textColor = [UIColor systemGreenColor];
-        else                     c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-        return c;
-    }
-
-    if (ip.row == 0) {
-        c.textLabel.text = @"本次会话指标";
-        c.detailTextLabel.numberOfLines = 4;
-        c.detailTextLabel.text = [[BSPProxyServer shared] throughputLine];
-        c.selectionStyle = UITableViewCellSelectionStyleNone;
-        return c;
-    }
-    if ([BSPCdnPool multiHostMode] && ip.row == 1) {
-        /* 多 host 模式才有「全部启用」行（恢复自动调度） */
-        c.textLabel.text = @"全部启用（恢复自动调度）";
-        c.textLabel.textColor = [UIColor systemBlueColor];
-        c.detailTextLabel.text = @"把所有节点都放回候选池，由实测速度自动分配";
-        return c;
-    }
-    {
-        /* 说明行：单 host 模式 row 1，多 host 模式 row 2 */
-        c.textLabel.text = @"调参";
-        c.detailTextLabel.numberOfLines = 4;
-        if ([BSPCdnPool multiHostMode]) {
-            c.detailTextLabel.text = [NSString stringWithFormat:
-                @"分片 %ld KiB，并发窗口 %ld（多 host 模式）\n"
-                @"本页的开关与勾选立即生效；改 hosts.txt / mode.txt 需重启 App",
-                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
-        } else {
-            c.detailTextLabel.text = [NSString stringWithFormat:
-                @"单 host 多连接：分片 %ld KiB × 并发窗口 %ld 条连接，"
-                @"打同一海外 CDN 绕 per-connection 限速\n"
-                @"想改回「散到多 host」：在 Documents/BiliFast/hosts.txt 写入.host 列表后重启 App",
-                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
-        }
-        c.selectionStyle = UITableViewCellSelectionStyleNone;
-        return c;
-    }
-}
-
-- (void)masterChanged:(UISwitch *)sw
-{
-    self.enabled = sw.on;
-    if (self.onToggle) self.onToggle(self.enabled);
-    [self.table reloadSections:[NSIndexSet indexSetWithIndex:0]
-              withRowAnimation:UITableViewRowAnimationNone];
-}
-
-- (void)ballChanged:(UISwitch *)sw
-{
-    self.ballShown = sw.on;
-    if (self.onToggleBall) self.onToggleBall(self.ballShown);
-}
-
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip
-{
-    [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section == 1) {
-        /* 单 host 模式：节点是当前视频的原始 host，不可勾选启停
-         * （关掉唯一的 host = 没有候选，毫无意义）。多 host 模式才允许勾选。 */
-        if ([BSPCdnPool multiHostMode]) {
-            NSMutableDictionary *d = self.rows[(NSUInteger)ip.row];
-            BOOL on = ![d[@"enabled"] boolValue];
-            d[@"enabled"] = @(on);
-            [[BSPProxyServer shared] setHost:d[@"host"] enabled:on];
-            [tv reloadSections:[NSIndexSet indexSetWithIndex:1]
-              withRowAnimation:UITableViewRowAnimationNone];
-        }
-        return;
-    }
-    if (ip.section == 2 && ip.row == 1 && [BSPCdnPool multiHostMode]) {
-        /* 多 host 模式 row 1 = 「全部启用」；单 host 模式 row 1 = 说明行，无动作 */
-        [[BSPProxyServer shared] enableAllHosts];
-        [self reloadRows];
-    }
-}
-
-@end
-
+TAIL = r'''
 //------------------------------------------------------------------------------
 #pragma mark - 覆盖窗口（小球 / 面板）
 //------------------------------------------------------------------------------
@@ -624,3 +407,14 @@ void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
 
     dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuild(); } });
 }
+'''
+
+src = io.open(P, encoding='utf-8').read()
+i = src.index(MARK)
+head = src[:i].rstrip()
+sep = '//' + '-' * 78
+if head.endswith(sep):
+    head = head[:-len(sep)].rstrip()
+
+io.open(P, 'w', encoding='utf-8', newline='\n').write(head + '\n' + TAIL)
+print('OK: %s  %d -> %d bytes' % (P, len(src), len(head + TAIL)))
