@@ -262,7 +262,8 @@
 static UIWindow         *gWin;
 static UIViewController *gRootVC;
 static UIButton         *gBall;
-static UIView           *gPanelBox;      /* 非空 = 面板正开着 */
+static UIView           *gPanelBox;      /* 非空 = 面板正开着（整屏遮罩） */
+static UIView           *gPanelCard;     /* 居中的卡片，面板实体 */
 static BiliFastPanel    *gPanel;         /* 每次打开新建，不复用 */
 static CGPoint           gBallCenter;
 static BOOL              gBallWanted = YES;
@@ -273,6 +274,7 @@ static NSHashTable      *gGestureWindows;
 static void FLogLine(NSString *s);
 static void FOpenPanel(void);
 static void FClosePanel(void);
+static void FLayoutCard(void);
 
 static NSString *FBallFrameKey(void) { return @"BiliFastBallFrame"; }
 
@@ -290,13 +292,24 @@ static CGPoint FLoadBallCenter(void)
 //------------------------------------------------------------------------------
 #pragma mark - 回调目标
 //------------------------------------------------------------------------------
-@interface BiliFastBallTarget : NSObject
+@interface BiliFastBallTarget : NSObject <UIGestureRecognizerDelegate>
 @end
 
 @implementation BiliFastBallTarget
 - (void)tapped { FOpenPanel(); }
 - (void)threeFingerDoubleTap { FOpenPanel(); }
 - (void)closeTapped { FClosePanel(); }
+- (void)backdropTapped { FClosePanel(); }
+
+/* 遮罩上的「点空白关闭」不能把卡片上的触摸也算进去 ——
+ * 手势挂在外层遮罩上时，落在卡片（它的子视图）里的触摸一样会喂给这个手势，
+ * 那样点表格任何地方都会把面板关掉。这里显式排除卡片区域。 */
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t
+{
+    if (!gPanelBox) return NO;
+    if (!gPanelCard) return YES;
+    return ![gPanelCard pointInside:[t locationInView:gPanelBox] withEvent:nil];
+}
 - (void)refreshTapped
 {
     [gPanel reloadRows];
@@ -339,7 +352,7 @@ static BiliFastBallTarget *gTarget;
         CGRect sc = scene.coordinateSpace.bounds;
         if (!CGRectIsEmpty(sc) && !CGRectEqualToRect(gWin.frame, sc)) gWin.frame = sc;
     }
-    gPanelBox.frame = self.view.bounds;
+    FLayoutCard();                          /* 转屏后整卡跟着重排 */
 }
 @end
 
@@ -365,6 +378,50 @@ static CGRect FFullScreenBounds(void)
         if (!CGRectIsEmpty(r)) return r;
     }
     return [UIScreen mainScreen].bounds;
+}
+
+/// 卡片的位置与大小：居中、让开安全区、且不贴屏幕边缘
+static CGRect FCardFrame(CGRect full, UIEdgeInsets sa)
+{
+    /* 左右各留 32，再往里 16 才是按钮 —— 于是「完成」离屏幕右边缘 48pt。
+     * 系统下拉控制中心是从右上角边缘起手的，留够距离才不会打架。
+     * 上边让开刘海/状态栏，下边让开 home 指示条。
+     * 高度封顶 600：大屏上别铺成一整页，那样又回到「太大」了。 */
+    CGFloat w     = MIN(full.size.width - 64.0, 560.0);
+    CGFloat top   = sa.top + 24.0;
+    CGFloat bot   = full.size.height - sa.bottom - 24.0;
+    CGFloat avail = MAX(bot - top, 200.0);
+    CGFloat h     = MIN(avail, 600.0);
+    return CGRectMake(round((full.size.width - w) / 2.0),
+                      round(top + (avail - h) / 2.0), w, h);
+}
+
+/// 按当前屏幕与安全区重排卡片内容。转屏时由 BiliFastOverlayVC 再调一次。
+static void FLayoutCard(void)
+{
+    if (!gPanelBox || !gPanelCard || !gRootVC) return;
+
+    CGRect full = FFullScreenBounds();
+    gPanelBox.frame  = CGRectMake(0, 0, full.size.width, full.size.height);
+    gPanelCard.frame = FCardFrame(full, gRootVC.view.safeAreaInsets);
+
+    const CGFloat barH = 52.0, btnW = 60.0, btnH = 44.0, pad = 16.0, gap = 8.0;
+    CGFloat cw = gPanelCard.frame.size.width;
+    CGFloat ch = gPanelCard.frame.size.height;
+
+    UIView   *bar = [gPanelCard viewWithTag:101];
+    UILabel  *tit = (UILabel *)[gPanelCard viewWithTag:102];
+    UIButton *dn  = (UIButton *)[gPanelCard viewWithTag:103];
+    UIButton *rf  = (UIButton *)[gPanelCard viewWithTag:104];
+
+    bar.frame = CGRectMake(0, 0, cw, barH);
+    dn.frame  = CGRectMake(cw - pad - btnW, (barH - btnH) / 2.0, btnW, btnH);
+    rf.frame  = CGRectMake(cw - pad - btnW - gap - btnW, (barH - btnH) / 2.0, btnW, btnH);
+    tit.frame = CGRectMake(pad, 0, MAX(rf.frame.origin.x - pad - gap, 40.0), barH);
+
+    if (gPanel.view.superview) {
+        gPanel.view.frame = CGRectMake(0, barH, cw, MAX(ch - barH, 0));
+    }
 }
 
 /// 给一个 App 窗口挂三指双击（同一个窗口只挂一次）
@@ -501,56 +558,71 @@ static void FOpenPanel(void)
         gPanel.enabled   = gIsEnabled ? gIsEnabled() : YES;
         gPanel.ballShown = gBallWanted;
 
-        const CGFloat barH = 52.0;
+        /* 背景遮罩：整屏压暗，点空白处关闭。
+         * 面板本身是一张**居中的卡片**，不铺满屏幕 —— 铺满时右上角的
+         * 「完成」正好落在系统下拉控制中心的手势区里，点不着。 */
         gPanelBox = [[UIView alloc] initWithFrame:CGRectMake(0, 0, full.size.width, full.size.height)];
-        gPanelBox.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        gPanelBox.backgroundColor = [UIColor systemBackgroundColor];
+        gPanelBox.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.38];
+        {
+            UITapGestureRecognizer *tap =
+                [[UITapGestureRecognizer alloc] initWithTarget:gTarget
+                                                        action:@selector(backdropTapped)];
+            tap.delegate = gTarget;          /* 点在卡片上时不关，见 shouldReceiveTouch */
+            tap.cancelsTouchesInView = NO;
+            [gPanelBox addGestureRecognizer:tap];
+        }
 
-        /* 顶栏自己做：不用 UINavigationController，也就没有 present 那一套 */
-        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, full.size.width, barH)];
-        bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        gPanelCard = [[UIView alloc] initWithFrame:CGRectZero];
+        gPanelCard.backgroundColor = [UIColor systemBackgroundColor];
+        gPanelCard.layer.cornerRadius = 14.0;
+        gPanelCard.layer.masksToBounds = YES;
+        [gPanelBox addSubview:gPanelCard];
+
+        /* 顶栏自己做：不用 UINavigationController，也就没有 present 那一套。
+         * 用 tag 取回来，是为了转屏时能整卡重排（见 FLayoutCard）。 */
+        UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+        bar.tag = 101;
         bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
-        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, full.size.width - 180, barH)];
-        title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
+        title.tag = 102;
         title.text = @"BiliFast 设置";
         title.font = [UIFont boldSystemFontOfSize:17];
         [bar addSubview:title];
 
         UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-        done.frame = CGRectMake(full.size.width - 74, 0, 60, barH);
-        done.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        done.tag = 103;
         [done setTitle:@"完成" forState:UIControlStateNormal];
         done.titleLabel.font = [UIFont boldSystemFontOfSize:17];
         [done addTarget:gTarget action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
         [bar addSubview:done];
 
         UIButton *refresh = [UIButton buttonWithType:UIButtonTypeSystem];
-        refresh.frame = CGRectMake(full.size.width - 136, 0, 60, barH);
-        refresh.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        refresh.tag = 104;
         [refresh setTitle:@"刷新" forState:UIControlStateNormal];
         [refresh addTarget:gTarget action:@selector(refreshTapped) forControlEvents:UIControlEventTouchUpInside];
         [bar addSubview:refresh];
 
-        [gPanelBox addSubview:bar];
+        [gPanelCard addSubview:bar];
 
         /* 真正的配置页：访问 .view 会触发 viewDidLoad（里面会 reloadRows） */
         [gRootVC addChildViewController:gPanel];
-        gPanel.view.frame = CGRectMake(0, barH, full.size.width, full.size.height - barH);
-        gPanel.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [gPanelBox addSubview:gPanel.view];
+        [gPanelCard addSubview:gPanel.view];
         [gPanel didMoveToParentViewController:gRootVC];
         [gPanel reloadRows];                     /* 确保表格有数据 */
 
         [gRootVC.view addSubview:gPanelBox];
+        FLayoutCard();                           /* 尺寸/安全区一次性算好 */
 
         FLogLine([NSString stringWithFormat:
-            @"面板已打开：CDN %ld 行，屏幕 %.0fx%.0f，%@外观",
+            @"面板已打开：CDN %ld 行，屏幕 %.0fx%.0f，卡片 %.0fx%.0f，%@外观",
             (long)gPanel.rows.count, full.size.width, full.size.height,
+            gPanelCard.frame.size.width, gPanelCard.frame.size.height,
             gPanel.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ? @"深色" : @"浅色"]);
     } @catch (NSException *ex) {
         [gPanelBox removeFromSuperview];
-        gPanelBox = nil;
+        gPanelBox  = nil;
+        gPanelCard = nil;
         gPanel = nil;
         gBall.hidden = !gBallWanted;
         FLogLine([NSString stringWithFormat:@"面板打开失败：%@ — %@", ex.name, ex.reason]);
@@ -560,14 +632,17 @@ static void FOpenPanel(void)
 static void FClosePanel(void)
 {
     if (!gPanelBox) return;
-    UIView *box = gPanelBox;
+    UIView *box  = gPanelBox;
+    UIView *card = gPanelCard;
     BiliFastPanel *p = gPanel;
-    gPanelBox = nil;
+    gPanelBox  = nil;
+    gPanelCard = nil;
     gPanel = nil;
     @try {
         [p willMoveToParentViewController:nil];
         [p.view removeFromSuperview];
         [p removeFromParentViewController];
+        [card removeFromSuperview];
         [box removeFromSuperview];
     } @catch (__unused NSException *e) {}
 

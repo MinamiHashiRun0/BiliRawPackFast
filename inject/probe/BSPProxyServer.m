@@ -34,12 +34,23 @@ static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 *
  *     聚合只有 0.05 MiB/s，反而低于单台的 0.11 MiB/s。
  * 这和 TCP 的拥塞控制是同一个问题，所以用同一套办法：AIMD。
  * 默认 6 是「不冒进」的起点：好网络几轮就涨上去，差网络涨不上去也不会崩。 */
-static const NSInteger kWindowStart      = 4;             /* 回退：8 在海外真机触发整机卡死。先 4 保证不卡，再视 A/B 上调 */
+/* 上限曾被砍到 8，理由是「8 在海外真机触发整机卡死」—— 后来查明那次卡死是
+ * noteHost 漏 unlock 造成的必然死锁，与并发量毫无关系（降到 6 一点用没有就是
+ * 证据）。所以这条上限砍得没有依据。
+ *
+ * 真机 AIMD 日志显示它一直在涨、根本没到顶：
+ *     并发窗口 4 → 6（本轮 0.16 MiB/s）
+ *     并发窗口 6 → 8（本轮 1.67 MiB/s）   ← 涨了 10 倍，然后被上限掐住
+ * 也就是说：不是网络到顶了，是我们不让它继续涨。放开上限，让 AIMD 自己找。 */
+static const NSInteger kWindowStart      = 8;
 static const NSInteger kWindowMin        = 2;
-static const NSInteger kWindowMax        = 8;             /* 回退：20 上限砍半，防连接风暴挤占主线程调度 */
-static const NSInteger kAdaptEveryChunks = 6;             /* 每完成几片评估一次 */
+static const NSInteger kWindowMax        = 24;
+/* 4 而不是 6：一轮只要 6 片，短视频会话可能等不到几次调整就播完了 */
+static const NSInteger kAdaptEveryChunks = 4;
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
-static const NSInteger kMaxInflightPerHost = 3;           /* 回退：4→3，单 host 多连接下别一次压太多 */
+/* 单 host 模式下这个值不参与调度（scheduleMore 给 wait=0，不查在途上限）；
+ * 多 host 模式才有意义。8 与窗口上限 24 之间留足余量。 */
+static const NSInteger kMaxInflightPerHost = 8;
 static const NSInteger kChunkRetries     = 1;             /* 回退：2→1，重试越多越容易在卡顿时雪崩 */
 /* 首片超时：这个值直接等于「最坏情况卡多久」——超时后回源，播放器要重新发起请求。
  * 真机 4.0 秒时出现过 6 次回源，累积卡顿接近一分钟；回到 1.5 秒：卡死时尽快回源放行，
@@ -285,12 +296,16 @@ static NSSet *kDropReqHeaders(void)
 
     {
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        /* 单 host 模式下，绕 per-connection 限速靠的是"同一 host 多条连接"。
-         * 但 8e61995 版曾设 24，海外真机上一打视频就整机卡死（日志断在 A/B
-         * 开始那行，主线程冻死不闪退）——24 路并发建连 + completionHandler 风暴
-         * 把调度挤垮。回退到 6：仍比旧版多 host 的 8 略聚焦，但不再风暴；
-         * 先保证能播，提速效果靠 A/B 数据再调。 */
-        cfg.HTTPMaximumConnectionsPerHost = 6;
+        /* 单 host 模式下，绕 per-connection 限速靠的就是"同一 host 多条连接"。
+         *
+         * 这个值必须 ≥ kWindowMax，否则窗口涨上去也没用：这里曾经是 6 而窗口
+         * 上限是 8，于是窗口到 8 时后 2 个分片卡在等连接，而 ctx.outstanding
+         * 已经把它们算成在途 —— 调度器以为自己满载，实际有两条在原地空转。
+         *
+         * （曾把这里从 24 回退到 6，是因为 8e61995 版一打视频就整机卡死。
+         *   那个卡死的真因是 noteHost 漏 unlock 的死锁，与连接数无关 ——
+         *   降连接数当时完全无效，正是明证。） */
+        cfg.HTTPMaximumConnectionsPerHost = 24;
         cfg.timeoutIntervalForRequest     = 20.0;
         cfg.timeoutIntervalForResource    = 180.0;
         cfg.requestCachePolicy            = NSURLRequestReloadIgnoringLocalCacheData;
