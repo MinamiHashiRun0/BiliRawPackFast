@@ -43,9 +43,11 @@ NS_ASSUME_NONNULL_BEGIN
  * 于是「代理到底跑了多少、多快」这条唯一能量化效果的线索会整条丢失。 */
 void BSPProxySetLogSink(void (^sink)(NSString *msg));
 
-/* 日志目录 {Documents}/biliprobe（会确保存在）。
- * 公开出来是因为 hooks.txt / mode.txt 这些开关文件都放在这里。 */
+/* 日志目录 {Documents}/<名字>（会确保存在）。
+ * 公开出来是因为 hooks.txt / mode.txt 这些开关文件都放在这里。
+ * 名字可改：探针用 biliprobe，正式模块 BiliFast 用 BiliFast。 */
 + (NSString *)logDir;
++ (void)setLogDirName:(NSString *)name;
 
 /* 是否把 URL 重写打开（读 Documents/biliprobe/mode.txt，缺省 proxy） */
 + (BOOL)rewriteEnabled;

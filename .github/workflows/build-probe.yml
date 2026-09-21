@@ -208,6 +208,87 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/cdn.pid" ]; then kill "$(cat "$RUNNER_TEMP/cdn.pid")" 2>/dev/null || true; fi
 
+  # ---------------------------------------------------------------- 正式模块
+  # BiliFast 是给用户日常用的版本：只保留真机验证过的链路（URL 改写 + 回环代理），
+  # 不做类枚举/缓存盘点/播放器轮询，日志只有一份会话报告。
+  # 与探针分开构建，避免把取证用的东西塞进日常使用的包里。
+  build-fast:
+    name: Build BiliFast (production)
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          set -euxo pipefail
+          export THEOS="$RUNNER_TEMP/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks" "$THEOS/bin"
+          if curl -fsSL --retry 2 -o "$RUNNER_TEMP/sdk.tar.xz" \
+               https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz; then
+            tar -xJf "$RUNNER_TEMP/sdk.tar.xz" -C "$THEOS/sdks"
+          else
+            SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
+            SDKVER=$(xcrun --sdk iphoneos --show-sdk-version)
+            ln -sfn "$SDKPATH" "$THEOS/sdks/iPhoneOS${SDKVER}.sdk"
+          fi
+
+      - name: Build BiliFast.dylib
+        run: |
+          set -euxo pipefail
+          export THEOS="$RUNNER_TEMP/theos"
+          export PATH="$THEOS/bin:$PATH"
+          cd inject/fast
+          make clean || true
+          make ARCHS=arm64
+          find . -name '*.dylib' -exec ls -la {} \;
+
+      - name: Verify dylib
+        run: |
+          set -euxo pipefail
+          DYLIB=$(find inject/fast -name 'BiliFast.dylib' | head -1)
+          [ -n "$DYLIB" ] || { echo "没找到 BiliFast.dylib"; exit 1; }
+          echo "FAST_DYLIB=$DYLIB" >> "$GITHUB_ENV"
+          file "$DYLIB"
+          lipo -info "$DYLIB" | grep -q arm64 || { echo "不含 arm64"; exit 1; }
+          if otool -L "$DYLIB" | tail -n +2 | grep -v -E '/System/Library/|/usr/lib/|@executable_path|@rpath'; then
+            echo "存在非系统依赖，注入后可能加载失败"; exit 1
+          fi
+          python3 "$GITHUB_WORKSPACE/_recon/check_dylib_syms.py" "$DYLIB"
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+          mkdir -p dist-fast/Frameworks
+          cp "$FAST_DYLIB" dist-fast/Frameworks/BiliFast.dylib
+          cat > dist-fast/README.txt <<'EOF'
+BiliFast —— 哔哩哔哩官方客户端「多 CDN 并发加速」模块
+
+安装：把 Frameworks/BiliFast.dylib 导入签名工具的插件注入列表，
+      或用已注入好的 IPA。不要同时用两种方式（会加载两次）。
+
+使用：正常看视频即可，不需要任何操作。
+      日志与报告在「文件」App → 我的 iPhone → 哔哩哔哩 → BiliFast/
+      其中 report.txt 里的「并发收益」是关键指标：
+        > 1.05  → 并发有效
+        ≤ 1     → 本机网络下单台 CDN 已不是瓶颈，本模块没有收益，建议卸掉
+
+开关（改完重启 App）：
+      BiliFast/mode.txt   写 direct → 完全不改写，退回原样播放
+      BiliFast/hosts.txt  每行一台 CDN，覆盖内置候选池
+EOF
+          cat dist-fast/README.txt
+
+      - name: Upload BiliFast dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: BiliFast-dylib
+          path: dist-fast/Frameworks/BiliFast.dylib
+          if-no-files-found: error
+
   build:
     name: Build dylib
     runs-on: macos-26

@@ -66,6 +66,8 @@ static void PLogProxy(NSString *fmt, ...)
     else NSLog(@"[BSPProxy] %@", msg);
 }
 
+static NSString *gLogDirName = @"biliprobe";   /* 探针与正式模块各自的日志目录名 */
+
 static NSSet *kDropReqHeaders(void)
 {
     static NSSet *s = nil;
@@ -186,14 +188,21 @@ static NSSet *kDropReqHeaders(void)
 
 #pragma mark - 模式开关
 
++ (void)setLogDirName:(NSString *)name
+{
+    /* 只允许单层目录名，避免被拼出 ".." 之类跑出沙盒 */
+    if (!name.length || [name rangeOfString:@"/"].location != NSNotFound) return;
+    gLogDirName = [name copy];
+}
+
 + (NSString *)logDir
 {
     NSArray *d = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *base = d.firstObject ?: NSTemporaryDirectory();
-    NSString *dir = [base stringByAppendingPathComponent:@"biliprobe"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+    NSString *p = [base stringByAppendingPathComponent:gLogDirName];
+    [[NSFileManager defaultManager] createDirectoryAtPath:p
                              withIntermediateDirectories:YES attributes:nil error:NULL];
-    return dir;
+    return p;
 }
 
 + (BOOL)rewriteEnabled
