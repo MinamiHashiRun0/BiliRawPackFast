@@ -75,18 +75,18 @@
     return n;
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s
 {
     if (s == 0) return @"并发加速";
-    if (s == 1) {
-        if ([BSPCdnPool multiHostMode]) {
-            return [NSString stringWithFormat:@"CDN 节点（已选 %lu / %lu）",
-                    (unsigned long)[self selectedCount], (unsigned long)self.rows.count];
-        }
-        /* 单 host 模式：节点是动态的（每个视频的原始 host），不是可选候选池 */
-        return @"当前 CDN（单 host 多连接模式）";
+    if (s == 1) return @"CDN 使用模式";
+    if (s == 2) {
+        NSInteger m = [BSPCdnPool mode];
+        if (m == BSPCdnModeFollow) return @"CDN 选择（当前模式用不到）";
+        return [NSString stringWithFormat:@"选择 CDN（已选 %lu 台%@）",
+                (unsigned long)[BSPCdnPool selectedHosts].count,
+                m == BSPCdnModeSingle ? @"，只取第一台" : @""];
     }
     return @"指标与说明";
 }
@@ -94,10 +94,9 @@
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s
 {
     if (s == 0) return 2;                        /* 总开关 + 悬浮球 */
-    if (s == 1) return (NSInteger)self.rows.count;
-    /* 单 host 模式不需要「全部启用」（只有一个动态节点）：指标 + 说明 = 2 行
-     * 多 host 模式保留「全部启用」：指标 + 全部启用 + 说明 = 3 行 */
-    return [BSPCdnPool multiHostMode] ? 3 : 2;
+    if (s == 1) return 3;                        /* 跟随 / 单 CDN / 多 CDN */
+    if (s == 2) return (NSInteger)[BSPCdnPool pickerCandidates].count;
+    return 2;                                    /* 指标 + 说明 */
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip
@@ -133,30 +132,68 @@
     }
 
     if (ip.section == 1) {
-        NSDictionary *d = self.rows[(NSUInteger)ip.row];
-        BOOL on = [d[@"enabled"] boolValue];
-        long long ok = [d[@"ok"] longLongValue];
-        long long fail = [d[@"fail"] longLongValue];
-        double speed = [d[@"speed"] doubleValue];
-        c.textLabel.text = d[@"host"];
-        c.textLabel.adjustsFontSizeToFitWidth = YES;
-        c.textLabel.minimumScaleFactor = 0.65;
-        c.detailTextLabel.text = [NSString stringWithFormat:@"均速 %.2f MiB/s   成功 %lld   失败 %lld",
-                                  speed, ok, fail];
-        /* 单 host 模式：不可勾选，无 checkmark、不可点。多 host 模式才显示勾选态 */
-        c.accessoryType = [BSPCdnPool multiHostMode]
-                            ? (on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone)
-                            : UITableViewCellAccessoryNone;
-        c.selectionStyle = [BSPCdnPool multiHostMode]
-                             ? UITableViewCellSelectionStyleDefault
-                             : UITableViewCellSelectionStyleNone;
-        /* 试过但一次都没成的节点标红：一眼看出该关谁 */
-        if (fail > 0 && ok == 0) c.detailTextLabel.textColor = [UIColor systemRedColor];
-        else if (ok > 0)         c.detailTextLabel.textColor = [UIColor systemGreenColor];
-        else                     c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        /* 三种模式单选。之前没有这个开关，用户没法指定走哪台 CDN —— 而 B 站
+         * 分给不同视频的 CDN 并不一样，想钉死一台快的都做不到。 */
+        NSString *name = nil, *desc = nil;
+        switch (ip.row) {
+            case BSPCdnModeFollow:
+                name = @"跟随原始 URL";
+                desc = @"不改 host，多分片打原始 CDN 拿多连接。最安全：签名与 host 本来就匹配";
+                break;
+            case BSPCdnModeSingle:
+                name = @"单 CDN 多发";
+                desc = @"全部流量钉到下面勾选的第一台 CDN，多连接并发";
+                break;
+            default:
+                name = @"多 CDN 多发";
+                desc = @"在下面勾选的几台 CDN 之间分配，每台也开多连接";
+                break;
+        }
+        c.textLabel.text = name;
+        c.detailTextLabel.text = desc;
+        c.accessoryType = ([BSPCdnPool mode] == ip.row)
+                            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         return c;
     }
 
+    if (ip.section == 2) {
+        NSArray<NSString *> *cands = [BSPCdnPool pickerCandidates];
+        BOOL usable = ([BSPCdnPool mode] != BSPCdnModeFollow);
+        NSString *host = (ip.row < (NSInteger)cands.count) ? cands[(NSUInteger)ip.row] : @"";
+
+        c.textLabel.text = host;
+        c.textLabel.adjustsFontSizeToFitWidth = YES;
+        c.textLabel.minimumScaleFactor = 0.6;
+        c.textLabel.textColor = usable ? [UIColor labelColor] : [UIColor tertiaryLabelColor];
+
+        /* 顺手把这台在本次会话里的实测表现写出来，好挑 */
+        NSDictionary *stat = nil;
+        for (NSDictionary *d in self.rows) {
+            if ([d[@"host"] isEqualToString:host]) { stat = d; break; }
+        }
+        if (stat) {
+            long long ok = [stat[@"ok"] longLongValue];
+            long long fail = [stat[@"fail"] longLongValue];
+            c.detailTextLabel.text = [NSString stringWithFormat:
+                @"本次：均速 %.2f MiB/s  成功 %lld  失败 %lld",
+                [stat[@"speed"] doubleValue], ok, fail];
+            if (fail > 0 && ok == 0) c.detailTextLabel.textColor = [UIColor systemRedColor];
+            else if (ok > 0)         c.detailTextLabel.textColor = [UIColor systemGreenColor];
+            else                     c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        } else {
+            c.detailTextLabel.text = @"本次尚未用过";
+            c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        }
+
+        c.accessoryType = [[BSPCdnPool selectedHosts] containsObject:host]
+                            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        /* Follow 模式下勾选没有意义，置灰不可点，免得以为设了没用 */
+        c.selectionStyle = usable ? UITableViewCellSelectionStyleDefault
+                                  : UITableViewCellSelectionStyleNone;
+        return c;
+    }
+
+    /* ---- section 3：指标与说明 ---- */
     if (ip.row == 0) {
         c.textLabel.text = @"本次会话指标";
         c.detailTextLabel.numberOfLines = 4;
@@ -164,29 +201,14 @@
         c.selectionStyle = UITableViewCellSelectionStyleNone;
         return c;
     }
-    if ([BSPCdnPool multiHostMode] && ip.row == 1) {
-        /* 多 host 模式才有「全部启用」行（恢复自动调度） */
-        c.textLabel.text = @"全部启用（恢复自动调度）";
-        c.textLabel.textColor = [UIColor systemBlueColor];
-        c.detailTextLabel.text = @"把所有节点都放回候选池，由实测速度自动分配";
-        return c;
-    }
     {
-        /* 说明行：单 host 模式 row 1，多 host 模式 row 2 */
         c.textLabel.text = @"调参";
         c.detailTextLabel.numberOfLines = 4;
-        if ([BSPCdnPool multiHostMode]) {
-            c.detailTextLabel.text = [NSString stringWithFormat:
-                @"分片 %ld KiB，并发窗口 %ld（多 host 模式）\n"
-                @"本页的开关与勾选立即生效；改 hosts.txt / mode.txt 需重启 App",
-                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
-        } else {
-            c.detailTextLabel.text = [NSString stringWithFormat:
-                @"单 host 多连接：分片 %ld KiB × 并发窗口 %ld 条连接，"
-                @"打同一海外 CDN 绕 per-connection 限速\n"
-                @"想改回「散到多 host」：在 Documents/BiliFast/hosts.txt 写入.host 列表后重启 App",
-                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
-        }
+        c.detailTextLabel.text = [NSString stringWithFormat:
+            @"分片 %ld KiB × 并发窗口 %ld\n"
+            @"改模式与 CDN 立即生效（下一个请求就走新的）\n"
+            @"改成不通的 CDN 会表现为失败变多、反而更慢，切回「跟随原始 URL」即可",
+            (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
         c.selectionStyle = UITableViewCellSelectionStyleNone;
         return c;
     }
@@ -209,23 +231,22 @@
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip
 {
     [tv deselectRowAtIndexPath:ip animated:YES];
+
     if (ip.section == 1) {
-        /* 单 host 模式：节点是当前视频的原始 host，不可勾选启停
-         * （关掉唯一的 host = 没有候选，毫无意义）。多 host 模式才允许勾选。 */
-        if ([BSPCdnPool multiHostMode]) {
-            NSMutableDictionary *d = self.rows[(NSUInteger)ip.row];
-            BOOL on = ![d[@"enabled"] boolValue];
-            d[@"enabled"] = @(on);
-            [[BSPProxyServer shared] setHost:d[@"host"] enabled:on];
-            [tv reloadSections:[NSIndexSet indexSetWithIndex:1]
-              withRowAnimation:UITableViewRowAnimationNone];
-        }
+        /* 切换 CDN 使用模式。存 NSUserDefaults，下一个请求就按新模式走，
+         * 不需要重启 —— 所以这里只要重画本页。 */
+        [BSPCdnPool setMode:(BSPCdnMode)ip.row];
+        [tv reloadData];
         return;
     }
-    if (ip.section == 2 && ip.row == 1 && [BSPCdnPool multiHostMode]) {
-        /* 多 host 模式 row 1 = 「全部启用」；单 host 模式 row 1 = 说明行，无动作 */
-        [[BSPProxyServer shared] enableAllHosts];
-        [self reloadRows];
+
+    if (ip.section == 2) {
+        if ([BSPCdnPool mode] == BSPCdnModeFollow) return;   /* 置灰的行不响应 */
+        NSArray<NSString *> *cands = [BSPCdnPool pickerCandidates];
+        if (ip.row >= (NSInteger)cands.count) return;
+        [BSPCdnPool toggleHost:cands[(NSUInteger)ip.row]];
+        [tv reloadData];
+        return;
     }
 }
 
@@ -503,7 +524,9 @@ static void FBuildOverlay(void)
 
     gWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 46, 46)];
     gWin.windowScene = scene;                     /* iOS 13+ 不设它窗口根本不显示 */
-    gWin.windowLevel = UIWindowLevelAlert + 1;
+    /* 比 Alert 高一截：B 站自己也会往 Alert 层加窗口（弹窗、播放器浮层），
+     * 只高 1 容易被它们盖住，小球就点不着了。 */
+    gWin.windowLevel = UIWindowLevelAlert + 10;
     gWin.backgroundColor = [UIColor clearColor];
     gWin.rootViewController = gRootVC;
 
@@ -688,6 +711,67 @@ static void FTryBuild(void)
                    dispatch_get_main_queue(), ^{ FTryBuild(); });
 }
 
+//------------------------------------------------------------------------------
+#pragma mark - 回到前台
+//------------------------------------------------------------------------------
+// 真机故障：切出去再切回来，**三指双击还能打开面板，但小球点不动了**。
+//
+// 这条现象直接指出了病灶：三指手势挂在 B 站自己的 key window 上，而小球挂在
+// 我们自建的 UIWindow 上。手势还有效说明 App 那边一切正常，所以出问题的是
+// 我们那个窗口 —— 切后台时它脱离了窗口场景（不在 scene.windows 里了），
+// 于是既不接受触摸、也不会被重新接回来。
+//
+// 处理：回到前台时先检查窗口是否还在当前场景里。不在就整个拆掉重建
+// （小球位置存在 NSUserDefaults，重建后位置不变）；还在就只重申层级与可见性。
+// gTarget 不重建 —— 已经挂在 App 各窗口上的三指手势还指着它，换掉会留下一批
+// 指向旧对象的识别器。
+
+static void FTeardownOverlay(void)
+{
+    if (gPanelBox) FClosePanel();
+    @try {
+        if (gWin) {
+            gWin.hidden = YES;
+            gWin.rootViewController = nil;
+        }
+    } @catch (__unused NSException *e) {}
+    gWin = nil;
+    gRootVC = nil;
+    gBall = nil;
+    gPanelBox = nil;
+    gPanelCard = nil;
+    gPanel = nil;
+    /* 不动 gTarget / gGestureWindows：手势还挂在 App 的窗口上，换掉就断了 */
+}
+
+static void FRefreshOverlayForForeground(void)
+{
+    UIWindowScene *scene = FActiveWindowScene();
+
+    if (!gWin) {                       /* 还没建过（或上次建失败了）——直接重试 */
+        gBuildTries = 0;
+        FTryBuild();
+        return;
+    }
+
+    BOOL attached = (scene != nil &&
+                     gWin.windowScene == scene &&
+                     [scene.windows containsObject:gWin]);
+    if (!attached) {
+        FLogLine(@"回到前台：覆盖窗口已不在当前场景里，重建");
+        FTeardownOverlay();
+        gBuildTries = 0;
+        FTryBuild();
+        return;
+    }
+
+    /* 窗口还在，只需把被系统改掉的层级与可见性重申一遍 */
+    gWin.windowLevel = UIWindowLevelAlert + 10;
+    gWin.hidden = !(gBallWanted || gPanelBox);
+    if (gPanelBox) FLayoutCard();
+    FLogLine(@"回到前台：覆盖窗口仍在，已重申层级");
+}
+
 void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
 {
     BOOL expected = NO;
@@ -696,6 +780,16 @@ void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
 
     gIsEnabled  = [isEnabled copy];
     gSetEnabled = [setEnabled copy];
+
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+                    queue:[NSOperationQueue mainQueue]
+               usingBlock:^(NSNotification *n) {
+        @try { FRefreshOverlayForForeground(); }
+        @catch (NSException *ex) {
+            FLogLine([NSString stringWithFormat:@"回到前台处理失败：%@", ex.reason ?: @"?"]);
+        }
+    }];
 
     dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuild(); } });
 }

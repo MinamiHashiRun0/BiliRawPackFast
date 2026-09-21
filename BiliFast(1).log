@@ -1,0 +1,242 @@
+09-21 21:01:03 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:03 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:03 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:03 [cfg] 并发加速 已开启
+09-21 21:01:03 [boot] ✓ 代理已启动 127.0.0.1:57298
+09-21 21:01:03 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:03 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:03 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:01:18 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:18 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:18 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:18 [cfg] 并发加速 已开启
+09-21 21:01:18 [boot] ✓ 代理已启动 127.0.0.1:57481
+09-21 21:01:18 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:18 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:18 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:01:39 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:39 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:39 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:39 [cfg] 并发加速 已开启
+09-21 21:01:39 [boot] ✓ 代理已启动 127.0.0.1:57656
+09-21 21:01:39 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:39 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:39 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:02:26 [proxy] A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net）
+09-21 21:13:18 [boot] ================ BiliFast 已加载 ================
+09-21 21:13:18 [boot] 构建 1299eba  编译于 2026-09-21T13:10:03Z
+09-21 21:13:18 [boot] 日志目录 /var/mobile/Containers/Data/Application/C5160AF8-D13D-4F82-97CE-8D1D996F4EA5/Documents/BiliFast
+09-21 21:13:18 [cfg] 并发加速 已开启
+09-21 21:13:18 [boot] ✓ 代理已启动 127.0.0.1:58597
+09-21 21:13:18 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:13:18 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:13:18 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:13:32 [boot] ================ BiliFast 已加载 ================
+09-21 21:13:32 [boot] 构建 1299eba  编译于 2026-09-21T13:10:03Z
+09-21 21:13:32 [boot] 日志目录 /var/mobile/Containers/Data/Application/C5160AF8-D13D-4F82-97CE-8D1D996F4EA5/Documents/BiliFast
+09-21 21:13:32 [cfg] 并发加速 已开启
+09-21 21:13:32 [boot] ✓ 代理已启动 127.0.0.1:58605
+09-21 21:13:32 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:13:32 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:13:32 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:14:19 [proxy] A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net）
+09-21 21:19:55 [boot] ================ BiliFast 已加载 ================
+09-21 21:19:55 [boot] 构建 1299eba  编译于 2026-09-21T13:10:03Z
+09-21 21:19:55 [boot] 日志目录 /var/mobile/Containers/Data/Application/C5160AF8-D13D-4F82-97CE-8D1D996F4EA5/Documents/BiliFast
+09-21 21:19:55 [cfg] 并发加速 已开启
+09-21 21:19:55 [boot] ✓ 代理已启动 127.0.0.1:58801
+09-21 21:19:55 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:19:55 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:19:55 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:36:36 [boot] ================ BiliFast 已加载 ================
+09-21 21:36:36 [boot] 构建 cb7a320  编译于 2026-09-21T13:32:24Z
+09-21 21:36:36 [boot] 日志目录 /var/mobile/Containers/Data/Application/D5E50624-4471-4EF9-B4BB-1E7EE661C217/Documents/BiliFast
+09-21 21:36:36 [cfg] 并发加速 已开启
+09-21 21:36:36 [boot] ✓ 代理已启动 127.0.0.1:60801
+09-21 21:36:36 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:36:36 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:36:36 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:36:38 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-100024.m4s  0.37 MiB / 0.099s = 3.78 MiB/s
+09-21 21:36:38 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-30280.m4s  0.12 MiB / 0.199s = 0.62 MiB/s
+09-21 21:36:39 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-30280.m4s  0.04 MiB / 0.031s = 1.41 MiB/s
+09-21 21:36:42 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-30280.m4s  0.04 MiB / 0.039s = 1.12 MiB/s
+09-21 21:36:42 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-100024.m4s  0.05 MiB / 0.040s = 1.21 MiB/s
+09-21 21:36:42 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-100024.m4s  0.05 MiB / 0.039s = 1.22 MiB/s
+09-21 21:36:42 [proxy] 并发窗口 4 → 6（本轮 0.16 MiB/s）
+09-21 21:36:42 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42006677186-1-100024.m4s  0.05 MiB / 0.046s = 1.03 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.08 MiB / 0.036s = 2.34 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30066.m4s  0.57 MiB / 0.082s = 6.95 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.08 MiB / 0.045s = 1.85 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30066.m4s  0.21 MiB / 0.075s = 2.85 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30066.m4s  0.35 MiB / 0.039s = 9.13 MiB/s
+09-21 21:36:51 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.08 MiB / 0.043s = 1.96 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.02 MiB / 0.036s = 0.54 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.17 MiB / 0.038s = 4.54 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.069s = 14.49 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.051s = 19.66 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.050s = 20.15 MiB/s
+09-21 21:36:53 [proxy] 并发窗口 6 → 8（本轮 1.67 MiB/s）
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.059s = 16.99 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.053s = 18.77 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.046s = 21.91 MiB/s
+09-21 21:36:53 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.42 MiB / 0.041s = 10.24 MiB/s
+09-21 21:36:55 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.044s = 0.99 MiB/s
+09-21 21:36:57 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.042s = 1.04 MiB/s
+09-21 21:36:57 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.049s = 0.89 MiB/s
+09-21 21:36:57 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.58 MiB / 0.045s = 12.79 MiB/s
+09-21 21:36:57 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.062s = 16.13 MiB/s
+09-21 21:36:57 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.27 MiB / 0.040s = 6.77 MiB/s
+09-21 21:36:59 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.042s = 1.04 MiB/s
+09-21 21:36:59 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.73 MiB / 0.051s = 14.26 MiB/s
+09-21 21:36:59 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.057s = 17.48 MiB/s
+09-21 21:36:59 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.050s = 20.14 MiB/s
+09-21 21:37:00 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.174s = 5.75 MiB/s
+09-21 21:37:00 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.23 MiB / 0.046s = 4.93 MiB/s
+09-21 21:37:01 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.048s = 0.91 MiB/s
+09-21 21:37:02 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.77 MiB / 0.062s = 12.54 MiB/s
+09-21 21:37:02 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.052s = 19.36 MiB/s
+09-21 21:37:02 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.059s = 16.88 MiB/s
+09-21 21:37:02 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.052s = 19.09 MiB/s
+09-21 21:37:02 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.18 MiB / 0.051s = 3.55 MiB/s
+09-21 21:37:05 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.045s = 0.98 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.047s = 0.93 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.82 MiB / 0.075s = 10.96 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.066s = 15.15 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.75 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.067s = 14.88 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.057s = 17.48 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.259s = 3.87 MiB/s
+09-21 21:37:06 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.34 MiB / 0.050s = 6.80 MiB/s
+09-21 21:37:07 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.041s = 1.07 MiB/s
+09-21 21:37:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.66 MiB / 0.056s = 11.87 MiB/s
+09-21 21:37:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.201s = 4.96 MiB/s
+09-21 21:37:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.063s = 15.84 MiB/s
+09-21 21:37:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.054s = 18.67 MiB/s
+09-21 21:37:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.29 MiB / 0.060s = 4.86 MiB/s
+09-21 21:37:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.71 MiB / 0.052s = 13.48 MiB/s
+09-21 21:37:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.137s = 7.28 MiB/s
+09-21 21:37:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.053s = 18.86 MiB/s
+09-21 21:37:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.066s = 15.25 MiB/s
+09-21 21:37:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.25 MiB / 0.085s = 2.95 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.051s = 0.87 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.75 MiB / 0.069s = 10.87 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.161s = 6.20 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.061s = 16.32 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.052s = 19.42 MiB/s
+09-21 21:37:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.071s = 14.06 MiB/s
+09-21 21:37:12 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.053s = 18.82 MiB/s
+09-21 21:37:12 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.40 MiB / 0.048s = 8.49 MiB/s
+09-21 21:37:15 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.060s = 0.74 MiB/s
+09-21 21:37:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.60 MiB / 0.095s = 6.30 MiB/s
+09-21 21:37:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.072s = 13.96 MiB/s
+09-21 21:37:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.94 MiB/s
+09-21 21:37:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.04 MiB / 0.055s = 0.77 MiB/s
+09-21 21:37:19 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.055s = 0.80 MiB/s
+09-21 21:37:19 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.96 MiB / 0.071s = 13.47 MiB/s
+09-21 21:37:19 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.061s = 16.37 MiB/s
+09-21 21:37:19 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.052s = 19.24 MiB/s
+09-21 21:37:20 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.227s = 4.41 MiB/s
+09-21 21:37:20 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.061s = 16.32 MiB/s
+09-21 21:37:20 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.123s = 8.11 MiB/s
+09-21 21:37:20 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.20 MiB / 0.050s = 3.97 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.047s = 0.93 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.80 MiB / 0.060s = 13.39 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.060s = 16.61 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.053s = 18.74 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.77 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.159s = 6.29 MiB/s
+09-21 21:37:21 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.052s = 19.11 MiB/s
+09-21 21:37:22 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.35 MiB / 0.051s = 6.84 MiB/s
+09-21 21:37:23 [proxy] A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net）
+09-21 21:37:23 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.041s = 1.07 MiB/s
+09-21 21:37:23 [proxy] A/B 实测：单连接 9.96 MiB/s（0.20s, 2097152 B, 成功0）  vs  4 连接并发 17.78 MiB/s（0.11s, 2097152 B, 成功4）  → 并发收益 1.79x（并发更快）
+09-21 21:37:26 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.65 MiB / 0.163s = 3.99 MiB/s
+09-21 21:37:26 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.165s = 6.05 MiB/s
+09-21 21:37:26 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.221s = 4.52 MiB/s
+09-21 21:37:27 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.204s = 4.89 MiB/s
+09-21 21:37:27 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.31 MiB / 0.048s = 6.42 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.056s = 0.78 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.69 MiB / 0.057s = 12.14 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.095s = 10.47 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.118s = 8.50 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.74 MiB/s
+09-21 21:37:28 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.26 MiB / 0.048s = 5.50 MiB/s
+09-21 21:37:30 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.039s = 1.12 MiB/s
+09-21 21:37:33 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.74 MiB / 0.224s = 3.29 MiB/s
+09-21 21:37:33 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.147s = 6.81 MiB/s
+09-21 21:37:33 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.075s = 13.26 MiB/s
+09-21 21:37:33 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.172s = 5.81 MiB/s
+09-21 21:37:33 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.22 MiB / 0.047s = 4.69 MiB/s
+09-21 21:37:34 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.00 MiB / 0.047s = 0.05 MiB/s
+09-21 21:37:35 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.061s = 0.68 MiB/s
+09-21 21:37:36 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.78 MiB / 0.052s = 15.02 MiB/s
+09-21 21:37:36 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.76 MiB/s
+09-21 21:37:36 [stat] 代理：请求=112 完成=111 上游分片=179 失败=0 302回源=0 | 送达 68.01 MiB  墙钟聚合 1.17 MiB/s  单请求均 8.29 MiB/s | 单 host 多连接模式（upos-hz-mirrorakam.akamaized.net）实测均速 5.90 MiB/s，收益看 A/B | 重写URL=36
+09-21 21:37:36 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.167s = 5.97 MiB/s
+09-21 21:37:36 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.066s = 15.07 MiB/s
+09-21 21:37:36 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.151s = 6.61 MiB/s
+09-21 21:37:37 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.080s = 12.48 MiB/s
+09-21 21:37:37 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.37 MiB / 0.066s = 5.68 MiB/s
+09-21 21:37:38 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.058s = 0.76 MiB/s
+09-21 21:37:40 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.63 MiB / 0.059s = 10.51 MiB/s
+09-21 21:37:40 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.141s = 7.12 MiB/s
+09-21 21:37:40 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.058s = 17.10 MiB/s
+09-21 21:37:40 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.147s = 6.80 MiB/s
+09-21 21:37:40 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.33 MiB / 0.048s = 6.90 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.069s = 0.63 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.67 MiB / 0.062s = 10.81 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.81 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.185s = 5.39 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.77 MiB/s
+09-21 21:37:41 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.29 MiB / 0.042s = 6.83 MiB/s
+09-21 21:37:44 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.049s = 0.89 MiB/s
+09-21 21:37:46 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.71 MiB / 0.070s = 10.13 MiB/s
+09-21 21:37:46 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.200s = 5.00 MiB/s
+09-21 21:37:46 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.060s = 16.61 MiB/s
+09-21 21:37:46 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.138s = 7.27 MiB/s
+09-21 21:37:46 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.24 MiB / 0.047s = 5.17 MiB/s
+09-21 21:37:47 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.054s = 0.81 MiB/s
+09-21 21:37:56 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.040s = 1.11 MiB/s
+09-21 21:38:05 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.045s = 0.98 MiB/s
+09-21 21:38:07 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.76 MiB / 0.064s = 11.86 MiB/s
+09-21 21:38:07 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.041s = 1.08 MiB/s
+09-21 21:38:07 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.061s = 16.46 MiB/s
+09-21 21:38:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.238s = 4.20 MiB/s
+09-21 21:38:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.159s = 6.30 MiB/s
+09-21 21:38:08 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.20 MiB / 0.047s = 4.28 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.80 MiB / 0.159s = 5.02 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.053s = 0.83 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.060s = 16.70 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.137s = 7.31 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.075s = 13.39 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.039s = 1.12 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.133s = 7.50 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.055s = 0.80 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.197s = 5.08 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.36 MiB / 0.110s = 3.23 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.64 MiB / 0.071s = 9.04 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.056s = 17.81 MiB/s
+09-21 21:38:10 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.048s = 20.82 MiB/s
+09-21 21:38:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.128s = 7.81 MiB/s
+09-21 21:38:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.065s = 15.32 MiB/s
+09-21 21:38:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.152s = 6.60 MiB/s
+09-21 21:38:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.51 MiB / 0.050s = 10.14 MiB/s
+09-21 21:38:11 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.037s = 1.19 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.037s = 1.19 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.49 MiB / 0.055s = 8.91 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.065s = 15.40 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.178s = 5.62 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.15 MiB / 0.045s = 3.29 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.85 MiB / 0.079s = 10.73 MiB/s
+09-21 21:38:13 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.039s = 1.13 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.243s = 4.11 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.047s = 21.26 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.131s = 7.62 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.058s = 17.37 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.194s = 5.17 MiB/s
+09-21 21:38:14 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.30 MiB / 0.042s = 7.17 MiB/s
+09-21 21:38:15 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-30232.m4s  0.04 MiB / 0.041s = 1.08 MiB/s
+09-21 21:38:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  0.70 MiB / 0.063s = 11.09 MiB/s
+09-21 21:38:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.061s = 16.45 MiB/s
+09-21 21:38:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.132s = 7.56 MiB/s
+09-21 21:38:17 [proxy] 完成 upos-hz-mirrorakam.akamaized.net/…/42019390293-1-100029.m4s  1.00 MiB / 0.053s = 18.98 MiB/s

@@ -201,6 +201,9 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) BOOL benchScheduled;
 @property (nonatomic, copy)   NSString *benchURL;
 @property (nonatomic, copy)   NSString *benchLine;
+/* A/B 探测片学到的媒体文件总长。用来把实测范围夹在文件内 —— 否则会测到
+ * 末尾之外，上游返回 416 被算成失败（真机出现过「成功2/4、1048576 B」）。 */
+@property (nonatomic, assign) int64_t benchTotal;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, assign) BSPMSPlanner *planner;  /* 全局共享，跨请求学习 */
 @property (nonatomic, strong) NSMutableArray<NSString *> *hosts;
@@ -839,7 +842,16 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     ctx.nextWrite = ctx.reqStart;
     ctx.total     = -1;
 
-    origIdx = [self ensureHost:[self hostSpecOf:orig]];
+    /* 统计归属：Single 模式下真正取数的 host 是钉住的那台，不是 URL 自己的，
+     * 所以按钉住的登记，报告里才看得出流量到底走了谁。 */
+    {
+        NSString *spec = [self hostSpecOf:orig];
+        if ([BSPCdnPool mode] == BSPCdnModeSingle) {
+            NSString *pin = [BSPCdnPool pinnedHost];
+            if (pin.length) spec = pin;
+        }
+        origIdx = [self ensureHost:spec];
+    }
     ctx.originHostIdx = origIdx;
 
     /* 首片 fail-open 定时器 */
@@ -975,9 +987,25 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
               host:(NSString *)host
              retry:(NSInteger)retry
 {
-    /* 单 host 模式：不换 host，直接用原始 URL——多分片打同一海外 CDN 才能叠连接
-     * 绕 per-connection 限速。多 host 模式仍换到调度器选中的 host（旧行为）。 */
-    NSString *upURL = [BSPCdnPool multiHostMode] ? [BSPCdnPool url:ctx.url withHost:host] : ctx.url;
+    /* 按模式决定要不要换 host：
+     *   Follow —— 不换，直接用原始 URL。多分片打同一原始 CDN 就能叠连接绕限速。
+     *   Single —— 全部钉到用户选的那台 CDN。
+     *   Multi  —— 换到调度器选中的 host（旧行为）。
+     * url:withHost: 失败（URL 畸形）时退回原始 URL，不能返回 nil 让请求消失。 */
+    NSString *upURL = ctx.url;
+    switch ([BSPCdnPool mode]) {
+        case BSPCdnModeMulti:
+            upURL = [BSPCdnPool url:ctx.url withHost:host] ?: ctx.url;
+            break;
+        case BSPCdnModeSingle: {
+            NSString *pin = [BSPCdnPool pinnedHost];
+            if (pin.length) upURL = [BSPCdnPool url:ctx.url withHost:pin] ?: ctx.url;
+            break;
+        }
+        case BSPCdnModeFollow:
+        default:
+            break;
+    }
     NSMutableURLRequest *r;
     NSTimeInterval t0 = bsp_now();
     BOOL hostWarm;
@@ -1103,7 +1131,8 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             st.fail++;
             st.consecutiveErrors++;
             if (idx >= 0 && st.consecutiveErrors >= kBlacklistErrors
-                && [BSPCdnPool multiHostMode]   /* 单 host 模式不拉黑唯一节点，否则自杀 */
+                && [BSPCdnPool multiHostMode]   /* 只有多 CDN 模式才拉黑：另外两种模式
+                                                 * 下这是唯一的节点，拉黑 = 自杀 */
                 && bsp_ms_is_healthy(_planner, idx)) {
                 bsp_ms_set_healthy(_planner, idx, 0);
                 blacklisted = YES;
@@ -1222,9 +1251,20 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
                 start:(int64_t)s end:(int64_t)e
                  done:(void (^)(int64_t bytes, BOOL ok))done
 {
-    /* 单 host 模式：A/B 也用原始 URL（不换 host），对照的是「同一海外 CDN
-     * 多连接 vs 单连接」，正好回答"多连接能否绕 per-connection 限速"。 */
-    NSString *up = [BSPCdnPool multiHostMode] ? [BSPCdnPool url:url withHost:host] : url;
+    /* 与取数路径保持一致：Follow 用原始 URL，Single 钉住选定 CDN，Multi 换 host。
+     * A/B 要量的是「真实取数那条路」的并发收益，所以这里必须同款处理。 */
+    NSString *up = url;
+    switch ([BSPCdnPool mode]) {
+        case BSPCdnModeMulti:
+            up = [BSPCdnPool url:url withHost:host] ?: url;
+            break;
+        case BSPCdnModeSingle: {
+            NSString *pin = [BSPCdnPool pinnedHost];
+            if (pin.length) up = [BSPCdnPool url:url withHost:pin] ?: url;
+            break;
+        }
+        default: break;
+    }
     NSMutableURLRequest *r;
     if (!up || !_session) { if (done) done(0, NO); return; }
 
@@ -1240,6 +1280,23 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
                            ? [(NSHTTPURLResponse *)resp statusCode] : 0;
         BOOL ok = (!err && d.length > 0 && (code == 200 || code == 206));
+        if (ok && [resp isKindOfClass:[NSHTTPURLResponse class]]) {
+            /* Content-Range: bytes 0-524287/1234567 —— 顺手记下文件总长。
+             * 不记的话实测会一路测到文件末尾之外，416 被当成"失败"，
+             * 收益数字直接失真。取各片里最小的 /total，避免个别异常值。 */
+            NSString *cr = [(NSHTTPURLResponse *)resp allHeaderFields][@"Content-Range"];
+            if ([cr isKindOfClass:[NSString class]]) {
+                NSRange slash = [cr rangeOfString:@"/" options:NSBackwardsSearch];
+                if (slash.location != NSNotFound) {
+                    int64_t tot = [[cr substringFromIndex:NSMaxRange(slash)] longLongValue];
+                    if (tot > 0) {
+                        [_lock lock];
+                        if (_benchTotal <= 0 || tot < _benchTotal) _benchTotal = tot;
+                        [_lock unlock];
+                    }
+                }
+            }
+        }
         if (done) done(ok ? (int64_t)d.length : 0, ok);
     }] resume];
 }
@@ -1300,59 +1357,63 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     });
 }
 
-- (void)runBenchmark
+/* A/B 基准的默认测量范围。真正能测多远还要看探测片学到的文件总长 ——
+ * 文件比它小就按文件来。 */
+static const int64_t kBenchBudgetDefault = 2 * 1024 * 1024;
+
+/// 按当前模式挑出「取数真正走的那台 host」。三种模式都不要求历史成功记录。
+- (NSString *)benchHostForMode
 {
-    NSArray<NSDictionary *> *snap;
-    NSMutableArray<NSString *> *cands = [NSMutableArray array];
-    NSMutableArray<NSArray *> *serialJobs = [NSMutableArray array];
-    NSMutableArray<NSArray *> *parJobs = [NSMutableArray array];
-    const int64_t chunk = 512 * 1024;
-    int i;
+    NSString *h = nil;
 
-    if (!_benchURL.length) return;
-
-    if ([BSPCdnPool multiHostMode]) {
-        /* 多 host 模式：选有热连接成功记录的节点，按实测速度从高到低，取前 4 */
-        snap = [self hostSnapshot];
-        NSMutableArray<NSDictionary *> *sorted = [[snap filteredArrayUsingPredicate:
-            [NSPredicate predicateWithBlock:^BOOL(NSDictionary *d, id bindings) {
-                return [d[@"enabled"] boolValue] && [d[@"ok"] longLongValue] > 0;
-            }]] mutableCopy];
+    if ([BSPCdnPool mode] == BSPCdnModeSingle) {
+        /* 单 CDN 模式：就是钉住的那台 */
+        h = [BSPCdnPool pinnedHost];
+    } else if ([BSPCdnPool multiHostMode]) {
+        /* 多 CDN 模式：取有成功记录、实测最快的那个候选项 */
+        NSMutableArray<NSDictionary *> *sorted = [[[self hostSnapshot]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
+                ^BOOL(NSDictionary *d, id bindings) {
+                    return [d[@"enabled"] boolValue] && [d[@"ok"] longLongValue] > 0;
+                }]] mutableCopy];
         [sorted sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [b[@"speed"] compare:a[@"speed"]];
         }];
-        for (NSDictionary *d in sorted) {
-            if (cands.count >= 4) break;
-            [cands addObject:d[@"host"]];
-        }
-        if (cands.count == 0) {
-            PLogProxy(@"A/B 实测跳过：还没有任何成功过的节点");
-            return;
-        }
-    } else {
-        /* 单 host 模式：A/B = 「同一原始 host 多连接 vs 单连接」。不要求有成功
-         * 记录——哪怕之前全失败，也要测出"多连接是否更快"，这才是决定本模块去留
-         * 的关键数据。host 直接取 benchURL 自己的（就是改写前的真实媒体地址）。 */
-        NSString *orig = [BSPCdnPool hostOf:_benchURL];
-        if (orig.length) [cands addObject:orig];
+        if (sorted.count) h = sorted.firstObject[@"host"];
     }
-    /* 不够 4 个就重复用同一个 —— 单 host 模式下 4 个全是同一台，正是
-     * 「同一 CDN 开 4 条连接」的真实情形，与单连接串行可比。 */
-    if (cands.count == 0) {
-        PLogProxy(@"A/B 实测跳过：拿不到媒体 host");
+
+    /* Follow 模式（以及上面没挑出来时）：用 benchURL 自己的 host，
+     * 也就是改写前的真实媒体地址。 */
+    if (!h.length) h = [BSPCdnPool hostOf:_benchURL];
+    return h;
+}
+
+- (void)benchJobsWithBudget:(int64_t)budget host:(NSString *)host
+{
+    const int64_t chunk = kChunkBytes;
+    NSMutableArray<NSArray *> *serialJobs = [NSMutableArray array];
+    NSMutableArray<NSArray *> *parJobs    = [NSMutableArray array];
+    NSInteger n = (NSInteger)(budget / chunk);
+    NSInteger i;
+
+    if (n > 4) n = 4;          /* 每腿最多 4 片：与旧版可比，也不至于太吃带宽 */
+    if (n < 2) {
+        PLogProxy(@"A/B 实测跳过：可用范围不足（%lld B）", (long long)budget);
         return;
     }
-    while (cands.count < 4) [cands addObject:cands[0]];
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < n; i++) {
         int64_t s = (int64_t)i * chunk;
         int64_t e = s + chunk - 1;
-        [serialJobs addObject:@[cands[0], @(s), @(e)]];   /* A：全走同一台 */
-        [parJobs    addObject:@[cands[(NSUInteger)i], @(s), @(e)]]; /* B：四台各一片 */
+        /* 两条腿取**完全相同**的范围，只有串行/并发之分 —— 收益比值才只反映
+         * 并发本身。旧版给并发腿挑了不同 host，单 host 模式下虽然退化成同一台，
+         * 但语义上是两回事，容易看错。 */
+        [serialJobs addObject:@[host, @(s), @(e)]];
+        [parJobs    addObject:@[host, @(s), @(e)]];
     }
 
-    PLogProxy(@"A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host %@）",
-              [cands componentsJoinedByString:@", "]);
+    PLogProxy(@"A/B 实测开始：单连接 vs %ld 连接并发，各 %.2f MiB（host %@）",
+              (long)n, (double)(n * chunk) / 1048576.0, host);
 
     {
         NSTimeInterval a0 = bsp_now();
@@ -1363,27 +1424,77 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             [self benchParallel:parJobs t0:b0
                          finish:^(double secsB, int64_t bytesB, NSInteger okB) {
                 double mbpsB = secsB > 0.05 ? (double)bytesB / secsB / 1048576.0 : 0.0;
-                double gain = mbpsA > 0.001 ? mbpsB / mbpsA : 0.0;
+                double gain  = mbpsA > 0.001 ? mbpsB / mbpsA : 0.0;
+                /* 只有两腿都拿满才是干净样本。真机出过「成功2/4」——
+                 * 那是因为测到文件末尾之外拿了 416，不是网络问题。 */
+                BOOL clean = (okA == n && okB == n);
+
                 NSString *line = [NSString stringWithFormat:
-                    @"A/B 实测：单连接 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
-                    @"  vs  4 连接并发 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
-                    @"  → 并发收益 %.2fx%@",
-                    mbpsA, secsA, (long long)bytesA, (long)okA,
-                    mbpsB, secsB, (long long)bytesB, (long)okB,
+                    @"A/B 实测：单连接 %.2f MiB/s（%.2fs, 成功%ld/%ld）"
+                    @"  vs  %ld 连接并发 %.2f MiB/s（%.2fs, 成功%ld/%ld）"
+                    @"  → 并发收益 %.2fx%@%@",
+                    mbpsA, secsA, (long)okA, (long)n,
+                    (long)n, mbpsB, secsB, (long)okB, (long)n,
                     gain,
                     (gain >= 1.05 ? @"（并发更快）"
-                     : (gain > 0.01 ? @"（**并发更慢**）" : @"（样本不足）"))];
+                     : (gain > 0.01 ? @"（**并发更慢**）" : @"（样本不足）")),
+                    clean ? @"" : @"  ⚠ 有分片失败，本次数值不可信"];
+
                 [_lock lock];
                 _benchLine = line;
                 [_lock unlock];
                 PLogProxy(@"%@", line);
-                if (gain > 0.01 && gain < 1.05) {
+
+                if (clean && gain > 0.01 && gain < 1.05) {
                     PLogProxy(@"★ 你这条网络下并发是负收益。建议在设置面板里关掉"
                               @"「并发加速」，或把 BiliFast/mode.txt 写成 direct。");
                 }
             }];
         }];
     }
+}
+
+- (void)runBenchmark
+{
+    NSString *h;
+
+    if (!_benchURL.length) return;
+
+    h = [self benchHostForMode];
+    if (!h.length) {
+        PLogProxy(@"A/B 实测跳过：拿不到媒体 host");
+        return;
+    }
+
+    [_lock lock];
+    _benchTotal = 0;
+    [_lock unlock];
+
+    /* 先探一片：既确认这条路真能取到数，也顺便问出文件总长。
+     * 之后所有任务都夹在 [0, 总长) 之内 —— 旧版固定测 0~2 MiB，抽到小文件时
+     * 后两片越过末尾拿 416，被算成失败，量出来的收益完全不可信。 */
+    [self benchFetchURL:_benchURL host:h start:0 end:kChunkBytes - 1
+                   done:^(int64_t b, BOOL ok) {
+        int64_t total, budget;
+
+        [_lock lock];
+        total = _benchTotal;
+        [_lock unlock];
+
+        budget = kBenchBudgetDefault;
+        if (total > 0 && total < budget) budget = total;
+
+        if (!ok) {
+            PLogProxy(@"A/B 实测跳过：探测片就没取到（host %@）", h);
+            return;
+        }
+        if (budget < kChunkBytes * 2) {
+            PLogProxy(@"A/B 实测跳过：媒体文件太小（总长 %lld B），切不出两片可比",
+                      (long long)total);
+            return;
+        }
+        [self benchJobsWithBudget:budget host:h];
+    }];
 }
 
 - (void)scheduleBenchmarkWithURL:(NSString *)url

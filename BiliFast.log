@@ -1,0 +1,25 @@
+09-21 21:01:03 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:03 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:03 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:03 [cfg] 并发加速 已开启
+09-21 21:01:03 [boot] ✓ 代理已启动 127.0.0.1:57298
+09-21 21:01:03 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:03 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:03 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:01:18 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:18 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:18 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:18 [cfg] 并发加速 已开启
+09-21 21:01:18 [boot] ✓ 代理已启动 127.0.0.1:57481
+09-21 21:01:18 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:18 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:18 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:01:39 [boot] ================ BiliFast 已加载 ================
+09-21 21:01:39 [boot] 构建 8e61995  编译于 2026-09-21T12:12:14Z
+09-21 21:01:39 [boot] 日志目录 /var/mobile/Containers/Data/Application/0D7625E2-4D73-4633-9BC8-83A83AEA8198/Documents/BiliFast
+09-21 21:01:39 [cfg] 并发加速 已开启
+09-21 21:01:39 [boot] ✓ 代理已启动 127.0.0.1:57656
+09-21 21:01:39 [boot] 落点安装完毕，共 18 条（安装详情见上方逐条日志）
+09-21 21:01:39 [boot] 就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。
+09-21 21:01:39 [boot] 报告在 Documents/BiliFast/report.txt
+09-21 21:02:26 [proxy] A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net, upos-hz-mirrorakam.akamaized.net）

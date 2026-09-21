@@ -226,18 +226,79 @@ static void bsp_split_host(NSString *spec, NSString **outHost, NSNumber **outPor
     return out;
 }
 
-+ (BOOL)multiHostMode { return gOverrideHosts.count > 0; }
+#pragma mark - CDN 使用模式
+
+static NSString *const kModeKey  = @"BiliFastCdnMode";
+static NSString *const kHostsKey = @"BiliFastCdnHosts";
+
++ (BSPCdnMode)mode
+{
+    /* hosts.txt 仍然最优先：老用户写了文件就还是按多 host 走，
+     * 不会因为升级到带面板的版本而静默失效。 */
+    if (gOverrideHosts.count) return BSPCdnModeMulti;
+    NSNumber *n = [[NSUserDefaults standardUserDefaults] objectForKey:kModeKey];
+    NSInteger v = n ? n.integerValue : BSPCdnModeFollow;
+    if (v < BSPCdnModeFollow || v > BSPCdnModeMulti) v = BSPCdnModeFollow;
+    return (BSPCdnMode)v;
+}
+
++ (void)setMode:(BSPCdnMode)mode
+{
+    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kModeKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
++ (NSArray<NSString *> *)selectedHosts
+{
+    NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:kHostsKey];
+    if (![a isKindOfClass:[NSArray class]]) return @[];
+    /* 只保留字符串，防止 NSUserDefaults 里被塞进别的类型 */
+    NSMutableArray *out = [NSMutableArray array];
+    for (id h in a) if ([h isKindOfClass:[NSString class]] && [h length]) [out addObject:h];
+    return out;
+}
+
++ (void)setSelectedHosts:(NSArray<NSString *> *)hosts
+{
+    [[NSUserDefaults standardUserDefaults] setObject:(hosts ?: @[]) forKey:kHostsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
++ (void)toggleHost:(NSString *)host
+{
+    if (!host.length) return;
+    NSMutableArray *a = [[self selectedHosts] mutableCopy];
+    if ([a containsObject:host]) [a removeObject:host];
+    else                         [a addObject:host];
+    [self setSelectedHosts:a];
+}
+
++ (NSString *)pinnedHost
+{
+    return [self selectedHosts].firstObject;
+}
+
++ (NSArray<NSString *> *)pickerCandidates
+{
+    NSMutableArray *out = [NSMutableArray array];
+    /* 海外节点排前：这个模块是给海外用户用的，国内镜像多数连不上 */
+    for (NSString *h in [self overseaHosts])     if (![out containsObject:h]) [out addObject:h];
+    for (NSString *h in [self mainlandMirrors])  if (![out containsObject:h]) [out addObject:h];
+    /* 本次真正见过的也列上 —— 那是最可能可用的 */
+    for (NSString *h in [self seenMediaHosts])   if (![out containsObject:h]) [out addObject:h];
+    return out;
+}
+
++ (BOOL)multiHostMode { return [self mode] == BSPCdnModeMulti; }
 
 + (NSArray<NSString *> *)effectiveHostsForPlanner
 {
-    /* 单 host 模式（默认）：不预填候选池。海外用户从马来西亚直连国内 sz 镜像
-     * 多数超时/中断（真机日志 36 次「网络连接已中断」），把分片散过去只会拖慢
-     * 关键路径、触发 fail-open。改为每请求只用它自己的原始 host（通常是海外 CDN），
-     * 多分片并发 = 多条连接打同一海外 CDN = 绕过 per-connection 限速。
-     *
-     * 想用旧「散到多 host」行为：在 Documents/BiliFast/hosts.txt 里写 host 列表，
-     * 即进入多 host 模式，本方法返回该 override。 */
-    return gOverrideHosts ?: @[];
+    if ([self mode] != BSPCdnModeMulti) return @[];
+    if (gOverrideHosts.count) return gOverrideHosts;      /* hosts.txt 覆盖优先 */
+    NSArray *sel = [self selectedHosts];
+    /* 勾了就用勾的；一台没勾就退回内置海外节点 —— 多 host 模式下一个候选都没有
+     * 会让调度器 pick 不到任何 host，请求直接 502，那比走默认名单糟得多。 */
+    return sel.count ? sel : [self overseaHosts];
 }
 
 + (NSArray<NSString *> *)seenMediaHosts
