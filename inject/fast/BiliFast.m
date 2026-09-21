@@ -286,28 +286,41 @@ static NSString *FSessionReport(NSString *phase)
         atomic_load_explicit(&gRewriteCount, memory_order_relaxed),
         atomic_load_explicit(&gSeenCount, memory_order_relaxed)];
     [s appendFormat:@"%@\n", [[BSPProxyServer shared] throughputLine]];
+    {
+        NSString *b = [[BSPProxyServer shared] benchmarkLine];
+        [s appendString:b.length ? [NSString stringWithFormat:@"%@\n", b]
+                                 : @"（A/B 实测还没跑，通常启动后 45 秒左右出结果）\n"];
+    }
     [s appendString:@"\n各 CDN 实际承担：\n"];
     [s appendString:[[BSPProxyServer shared] statsReport]];
     [s appendFormat:@"\n阶段：%@\n", phase];
 
-    /* 自证：并发到底有没有用。这条不是装饰 —— 数值长期 ≤1 就该卸掉本模块。 */
+    /* 自证：并发到底有没有用。
+     * 首选**现场 A/B 实测**（同字节同区间，单连接 vs 4 台并发）——
+     * 那是唯一干净的对照。没有 A/B 数据时退回间接指标并明确标注。 */
     {
-        NSString *line = [[BSPProxyServer shared] throughputLine];
-        NSRange r = [line rangeOfString:@"并发收益 "];
-        double gain = 0.0;
-        if (r.location != NSNotFound) {
-            gain = [[line substringFromIndex:NSMaxRange(r)] doubleValue];
-        }
-        if (gain > 1.05) {
-            [s appendFormat:@"\n✓ 并发有效：%.2fx（播放器拿到的速度是最快单台 CDN 的 %.2f 倍）\n", gain, gain];
-        } else if (gain > 0.01) {
-            [s appendFormat:@"\n✗ **并发没有收益**：%.2fx。\n"
-                            @"   说明你这台设备到 B 站 CDN 的瓶颈不在这里 —— 单台已经够快了，\n"
-                            @"   把一条连接拆成几条只会多出建连与调度开销。\n"
-                            @"   建议在 %@/mode.txt 里写 direct 关闭，或直接卸掉本模块。\n",
-                            gain, kDirName];
+        NSString *bench = [[BSPProxyServer shared] benchmarkLine];
+        if (bench.length) {
+            [s appendFormat:@"\n%@\n", bench];
+            if ([bench rangeOfString:@"并发更慢"].location != NSNotFound) {
+                [s appendString:@"\n✗ **你这条网络下并发是负收益**。\n"
+                            @"   建议在设置面板里关掉「并发加速」，"
+                            @"或把 BiliFast/mode.txt 写成 direct。\n"];
+            } else if ([bench rangeOfString:@"并发更快"].location != NSNotFound) {
+                [s appendString:@"\n✓ 并发有效，保持开启即可。\n"];
+            }
         } else {
-            [s appendString:@"\n（本次会话还没有足够的样本判断并发是否有收益）\n"];
+            NSString *line = [[BSPProxyServer shared] throughputLine];
+            NSRange r = [line rangeOfString:@"并发收益 "];
+            double gain = 0.0;
+            if (r.location != NSNotFound) gain = [[line substringFromIndex:NSMaxRange(r)] doubleValue];
+            if (gain > 1.05) {
+                [s appendFormat:@"\n（间接指标：并发收益 %.2fx；A/B 实测还没出结果）\n", gain];
+            } else if (gain > 0.01) {
+                [s appendFormat:@"\n（间接指标：并发收益 %.2fx；等 A/B 实测出来再下结论）\n", gain];
+            } else {
+                [s appendString:@"\n（本次会话还没有足够样本；A/B 实测通常启动后 45 秒出结果）\n"];
+            }
         }
     }
     return s;

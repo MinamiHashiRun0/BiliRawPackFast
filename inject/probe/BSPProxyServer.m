@@ -24,11 +24,27 @@
  * （这是基于实测数值的调整，不是拍脑袋；下一版日志里的「单请求峰值」可以直接
  *   验证调大之后有没有真的变快。） */
 static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 */
-static const NSInteger kWindow           = 24;            /* 每连接的并发窗口 */
+/* 并发窗口：从保守值起步，再按「丢包/失败就减半、吞吐变好就加」自适应。
+ *
+ * 真机两次对照说明了为什么不能写死：
+ *   · 蜂窝网络（管子粗）：窗口 24 时聚合吞吐上得去，14 台 CDN 能同时出力
+ *   · 家用 WiFi（管子细）：窗口 24 会把路由器压垮 —— 日志里多个**不同** CDN
+ *     同时报「网络连接已中断」，而且失败的只是 150~250 KiB 的小分片；
+ *     随后重试、4 秒超时、fail-open 回源（6 次），播放器就一直卡缓冲。
+ *     聚合只有 0.05 MiB/s，反而低于单台的 0.11 MiB/s。
+ * 这和 TCP 的拥塞控制是同一个问题，所以用同一套办法：AIMD。
+ * 默认 6 是「不冒进」的起点：好网络几轮就涨上去，差网络涨不上去也不会崩。 */
+static const NSInteger kWindowStart      = 6;
+static const NSInteger kWindowMin        = 2;
+static const NSInteger kWindowMax        = 20;
+static const NSInteger kAdaptEveryChunks = 6;             /* 每完成几片评估一次 */
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
 static const NSInteger kMaxInflightPerHost = 4;           /* 每主机在途分片上限（防连接风暴） */
 static const NSInteger kChunkRetries     = 1;             /* 单个分片最多换几台重试 */
-static const double   kFirstChunkTimeout = 4.0;           /* 首片超过这么久就 fail-open 回源 */
+/* 首片超时：这个值直接等于「最坏情况卡多久」——超时后回源，播放器要重新发起请求。
+ * 真机 4.0 秒时出现过 6 次回源，累计卡顿接近一分钟；缩短到 2.5 秒能明显减轻。
+ * 大偏移读（4K 文件 64 MB 处）确实可能超过 2.5 秒，但那种情况回源也不亏。 */
+static const double   kFirstChunkTimeout = 2.5;
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
 static const int      kRecvTimeoutSec    = 15;
 
@@ -163,6 +179,17 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) double peakMiBps;
 @property (nonatomic, assign) BOOL anyHostMeasured;   /* 是否已有真实测速样本 */
 @property (nonatomic, strong) NSMutableSet<NSString *> *warmHosts;  /* 已建立过连接的 host */
+/* 自适应并发窗口（AIMD）。见文件顶部 kWindowStart 的注释。 */
+@property (nonatomic, assign) NSInteger window;
+@property (nonatomic, assign) int64_t adaptBytes;
+@property (nonatomic, assign) double  adaptStart;
+@property (nonatomic, assign) NSInteger adaptFails;
+@property (nonatomic, assign) NSInteger adaptChunks;
+@property (nonatomic, assign) double  adaptLastMiBps;
+/* 现场 A/B 实测 */
+@property (nonatomic, assign) BOOL benchScheduled;
+@property (nonatomic, copy)   NSString *benchURL;
+@property (nonatomic, copy)   NSString *benchLine;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, assign) BSPMSPlanner *planner;  /* 全局共享，跨请求学习 */
 @property (nonatomic, strong) NSMutableArray<NSString *> *hosts;
@@ -190,6 +217,8 @@ static NSSet *kDropReqHeaders(void)
         _hosts      = [NSMutableArray array];
         _hostIndex  = [NSMutableDictionary dictionary];
         _rewriteActive = YES;   /* 缺省开；设置面板可运行期关掉 */
+        _window     = kWindowStart;
+        _adaptStart = 0.0;
     }
     return self;
 }
@@ -371,6 +400,7 @@ static NSSet *kDropReqHeaders(void)
 - (NSString *)localURLFor:(NSString *)originalURL
 {
     NSString *token;
+    BOOL firstTime = NO;
     if (originalURL.length == 0 || !_running) return nil;
 
     [_lock lock];
@@ -380,8 +410,14 @@ static NSSet *kDropReqHeaders(void)
         _urlToToken[originalURL] = token;
         _tokenToURL[token] = originalURL;
         _rewrittenCount++;
+        firstTime = YES;
     }
     [_lock unlock];
+
+    /* 拿到第一个真实媒体 URL 之后，安排一次 A/B 实测（只跑一次）。
+     * 放在这里是因为：只有真实签名 URL 才能同时被多台 CDN 接受，
+     * 用它做对照才反映真实可用带宽。 */
+    if (firstTime) [self scheduleBenchmarkWithURL:originalURL];
 
     return [NSString stringWithFormat:@"http://127.0.0.1:%u/bsp/%@", (unsigned)_port, token];
 }
@@ -402,7 +438,7 @@ static NSSet *kDropReqHeaders(void)
 - (NSUInteger)totalRequests    { return _totalRequests; }
 
 - (NSInteger)chunkKiB { return (NSInteger)(kChunkBytes / 1024); }
-- (NSInteger)windowSize { return kWindow; }
+- (NSInteger)windowSize { return _window; }
 
 #pragma mark - 设置面板接口
 
@@ -823,7 +859,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
      * 真正需要收敛的只有 bytes=N-（开放式）：512 KiB × 16 = 8 MiB 可能冲过文件末尾，
      * 上游对越界 Range 返回 416，于是分片失败、整个请求 502。
      * 第一片的 Content-Range 就能学到总长，之后自动放开。 */
-    window = (ctx.total < 0 && ctx.reqEnd == INT64_MAX) ? 2 : kWindow;
+    window = (ctx.total < 0 && ctx.reqEnd == INT64_MAX) ? 2 : _window;
 
     while (ctx.outstanding < window) {
         int64_t s = ctx.nextFetch;
@@ -1034,6 +1070,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     PLogProxy(@"分片失败 %lld-%lld @ %@ (%@) 重试余 %ld",
               (long long)s, (long long)e, host, reason, (long)retry);
     if (blacklisted) PLogProxy(@"拉黑 %@（连续 %ld 次失败）", host, (long)kBlacklistErrors);
+    [self noteAdaptSample:0 failed:YES];
 
     /* 重试复用同一个在途槽位，不改 outstanding */
     if (retry > 0 && nextHost >= 0 && !ctx.closed && !ctx.failed) {
@@ -1113,6 +1150,245 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 {
     NSNumber *n = _hostIndex[host];
     return n ? n.intValue : -1;
+}
+
+#pragma mark - 现场 A/B 实测
+//
+// 见头文件里的说明。核心是「同样字节、同样区间、背靠背」：
+//   A：4 个连续 512 KiB 分片，串行从单台 CDN 取（等价于一条连接）
+//   B：同样 4 个分片，并发发给 4 台不同 CDN
+// 这样得到的两个 MiB/s 才是可比的 —— 与播放码率、播放器缓冲策略无关。
+
+- (void)benchFetchURL:(NSString *)url host:(NSString *)host
+                start:(int64_t)s end:(int64_t)e
+                 done:(void (^)(int64_t bytes, BOOL ok))done
+{
+    NSString *up = [BSPCdnPool url:url withHost:host];
+    NSMutableURLRequest *r;
+    if (!up || !_session) { if (done) done(0, NO); return; }
+
+    r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:up]];
+    r.timeoutInterval = 15.0;
+    r.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [r setValue:[NSString stringWithFormat:@"bytes=%lld-%lld", (long long)s, (long long)e]
+        forHTTPHeaderField:@"Range"];
+    [r setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+
+    [[_session dataTaskWithRequest:r
+       completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                           ? [(NSHTTPURLResponse *)resp statusCode] : 0;
+        BOOL ok = (!err && d.length > 0 && (code == 200 || code == 206));
+        if (done) done(ok ? (int64_t)d.length : 0, ok);
+    }] resume];
+}
+
+/// 串行跑完一列任务（模拟单连接）
+- (void)benchSerial:(NSArray<NSArray *> *)jobs
+                  i:(NSInteger)i
+              bytes:(int64_t)bytes
+                t0:(NSTimeInterval)t0
+             finish:(void (^)(double secs, int64_t bytes, NSInteger okCount))finish
+{
+    if (i >= (NSInteger)jobs.count) {
+        finish(bsp_now() - t0, bytes, 0);
+        return;
+    }
+    {
+        NSArray *j = jobs[(NSUInteger)i];
+        [self benchFetchURL:_benchURL host:j[0]
+                      start:[j[1] longLongValue] end:[j[2] longLongValue]
+                       done:^(int64_t b, BOOL ok) {
+            [self benchSerial:jobs i:i + 1 bytes:bytes + b t0:t0 finish:finish];
+        }];
+    }
+}
+
+/// 并发跑完一列任务（模拟多 CDN）
+- (void)benchParallel:(NSArray<NSArray *> *)jobs
+                   t0:(NSTimeInterval)t0
+               finish:(void (^)(double secs, int64_t bytes, NSInteger okCount))finish
+{
+    dispatch_group_t g = dispatch_group_create();
+    __block int64_t total = 0;
+    __block NSInteger okCount = 0;
+    __block NSInteger finished = 0;
+    NSInteger n = (NSInteger)jobs.count;
+
+    for (NSArray *j in jobs) {
+        dispatch_group_enter(g);
+        [self benchFetchURL:_benchURL host:j[0]
+                      start:[j[1] longLongValue] end:[j[2] longLongValue]
+                       done:^(int64_t b, BOOL ok) {
+            @synchronized (g) {
+                total += b;
+                if (ok) okCount++;
+                finished++;
+            }
+            dispatch_group_leave(g);
+        }];
+    }
+    dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        double secs = bsp_now() - t0;
+        int64_t bytes;
+        NSInteger oks;
+        @synchronized (g) { bytes = total; oks = okCount; }
+        finish(secs, bytes, oks);
+    });
+    (void)n;
+}
+
+- (void)runBenchmark
+{
+    NSArray<NSDictionary *> *snap;
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    NSMutableArray<NSArray *> *serialJobs = [NSMutableArray array];
+    NSMutableArray<NSArray *> *parJobs = [NSMutableArray array];
+    const int64_t chunk = 512 * 1024;
+    int i;
+
+    if (!_benchURL.length) return;
+
+    /* 选可用节点：优先「有热连接成功记录」的，按实测速度从高到低 */
+    snap = [self hostSnapshot];
+    {
+        NSMutableArray<NSDictionary *> *sorted = [[snap filteredArrayUsingPredicate:
+            [NSPredicate predicateWithBlock:^BOOL(NSDictionary *d, id bindings) {
+                return [d[@"enabled"] boolValue] && [d[@"ok"] longLongValue] > 0;
+            }]] mutableCopy];
+        [sorted sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [b[@"speed"] compare:a[@"speed"]];
+        }];
+        for (NSDictionary *d in sorted) {
+            if (cands.count >= 4) break;
+            [cands addObject:d[@"host"]];
+        }
+    }
+    if (cands.count == 0) {
+        PLogProxy(@"A/B 实测跳过：还没有任何成功过的节点");
+        return;
+    }
+    /* 节点不够 4 台就重复用同一台 —— 那是「单连接」的真实情形，仍然可比 */
+    while (cands.count < 4) [cands addObject:cands[0]];
+
+    for (i = 0; i < 4; i++) {
+        int64_t s = (int64_t)i * chunk;
+        int64_t e = s + chunk - 1;
+        [serialJobs addObject:@[cands[0], @(s), @(e)]];   /* A：全走同一台 */
+        [parJobs    addObject:@[cands[(NSUInteger)i], @(s), @(e)]]; /* B：四台各一片 */
+    }
+
+    PLogProxy(@"A/B 实测开始：单连接 vs 4 台并发，各 2 MiB（节点 %@）",
+              [cands componentsJoinedByString:@", "]);
+
+    {
+        NSTimeInterval a0 = bsp_now();
+        [self benchSerial:serialJobs i:0 bytes:0 t0:a0
+                   finish:^(double secsA, int64_t bytesA, NSInteger okA) {
+            double mbpsA = secsA > 0.05 ? (double)bytesA / secsA / 1048576.0 : 0.0;
+            NSTimeInterval b0 = bsp_now();
+            [self benchParallel:parJobs t0:b0
+                         finish:^(double secsB, int64_t bytesB, NSInteger okB) {
+                double mbpsB = secsB > 0.05 ? (double)bytesB / secsB / 1048576.0 : 0.0;
+                double gain = mbpsA > 0.001 ? mbpsB / mbpsA : 0.0;
+                NSString *line = [NSString stringWithFormat:
+                    @"A/B 实测：单连接 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
+                    @"  vs  4 台并发 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
+                    @"  → 并发收益 %.2fx%@",
+                    mbpsA, secsA, (long long)bytesA, (long)okA,
+                    mbpsB, secsB, (long long)bytesB, (long)okB,
+                    gain,
+                    (gain >= 1.05 ? @"（并发更快）"
+                     : (gain > 0.01 ? @"（**并发更慢**）" : @"（样本不足）"))];
+                [_lock lock];
+                _benchLine = line;
+                [_lock unlock];
+                PLogProxy(@"%@", line);
+                if (gain > 0.01 && gain < 1.05) {
+                    PLogProxy(@"★ 你这条网络下并发是负收益。建议在设置面板里关掉"
+                              @"「并发加速」，或把 BiliFast/mode.txt 写成 direct。");
+                }
+            }];
+        }];
+    }
+}
+
+- (void)scheduleBenchmarkWithURL:(NSString *)url
+{
+    if (_benchScheduled || !url.length) return;
+    _benchScheduled = YES;
+    [_lock lock];
+    _benchURL = [url copy];
+    [_lock unlock];
+
+    /* 等 45 秒再跑：避开起播时最紧张的那一段，也不与首个缓冲竞争带宽 */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @try { [self runBenchmark]; }
+        @catch (NSException *ex) { PLogProxy(@"A/B 实测异常：%@", ex.reason); }
+    });
+}
+
+- (NSString *)benchmarkLine
+{
+    NSString *s;
+    [_lock lock];
+    s = _benchLine;
+    [_lock unlock];
+    return s;
+}
+
+#pragma mark - 自适应并发窗口（AIMD）
+//
+// 每完成 kAdaptEveryChunks 片评估一次：
+//   有失败/超时  -> 窗口减半（最小 kWindowMin）—— 丢包就是拥塞信号，先退
+//   吞吐提升 ≥15% -> 窗口 +2（最大 kWindowMax）—— 有余量就多用
+//   其它          -> 保持
+// 这跟 TCP 拥塞控制的思路一致：细管子（家用 WiFi）上会迅速降到很低，
+// 粗管子（蜂窝）上会稳步涨上去。日志会记下每次调整，便于对照。
+- (void)noteAdaptSample:(int64_t)bytes failed:(BOOL)failed
+{
+    BOOL changed = NO;
+    NSInteger before = 0, after = 0, fails = 0;
+    double speed = 0.0, prev = 0.0;
+
+    [_lock lock];
+    {
+        double now = bsp_now();
+        if (_adaptStart <= 0.0) _adaptStart = now;
+        _adaptBytes += bytes;
+        _adaptChunks++;
+        if (failed) _adaptFails++;
+
+        if (_adaptChunks >= kAdaptEveryChunks) {
+            double dt = now - _adaptStart;
+            if (dt > 0.5) {
+                speed = (double)_adaptBytes / dt / 1048576.0;
+                prev  = _adaptLastMiBps;
+                before = _window;
+                fails = _adaptFails;
+
+                if (_adaptFails > 0) {
+                    _window = MAX(_window / 2, kWindowMin);
+                } else if (prev <= 0.001 || speed > prev * 1.15) {
+                    _window = MIN(_window + 2, kWindowMax);
+                }
+                after = _window;
+                changed = (after != before);
+                _adaptLastMiBps = speed;
+            }
+            _adaptBytes = 0;
+            _adaptChunks = 0;
+            _adaptFails = 0;
+            _adaptStart = now;
+        }
+    }
+    [_lock unlock];
+
+    if (changed) {
+        PLogProxy(@"并发窗口 %ld → %ld（本轮 %.2f MiB/s%@）",
+                  (long)before, (long)after, speed, fails > 0 ? @"，有失败故退让" : @"");
+    }
 }
 
 - (int)hostIndexOf:(NSString *)host
@@ -1198,6 +1474,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         _lastCompleteAt = bsp_now();
         if (mbps > _peakMiBps) _peakMiBps = mbps;
         [_lock unlock];
+        [self noteAdaptSample:ctx.bytesToClient failed:NO];
     }
     [self closeConn:ctx];
 }
