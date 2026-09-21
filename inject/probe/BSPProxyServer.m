@@ -494,7 +494,8 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         }
 
         contentLength = [headers[@"content-length"] integerValue];
-        while (contentLength > 0 && (NSInteger)buf.length < NSMaxRange(hdrEnd) + contentLength) {
+        while (contentLength > 0 &&
+               (NSInteger)buf.length < (NSInteger)(NSMaxRange(hdrEnd) + (NSUInteger)contentLength)) {
             uint8_t tmp[8192];
             ssize_t n = recv(ctx.fd, tmp, sizeof(tmp), 0);
             if (n <= 0) break;

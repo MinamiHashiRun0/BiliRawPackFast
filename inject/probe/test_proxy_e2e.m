@@ -43,7 +43,10 @@ static BOOL verifyRecipe(NSData *d, int64_t startOffset)
     return YES;
 }
 
-/* 同步 GET，返回 body / 状态码 / 耗时 */
+/* 同步 GET，返回 body / 状态码 / 耗时。
+ * 注意：outErr 是 out-parameter，不能在 block 里直接解引用写 —— 那属于
+ * 「block 捕获 autoreleasing out-parameter」，ARC 下可能变成 use-after-free。
+ * 这里先用 __block 变量接住，等信号量之后再赋给 outErr。 */
 static NSData *syncGET(NSString *url, NSString *range, NSInteger *outCode,
                        double *outSeconds, NSError **outErr)
 {
@@ -55,6 +58,8 @@ static NSData *syncGET(NSString *url, NSString *range, NSInteger *outCode,
 
     __block NSData *body = nil;
     __block NSInteger code = 0;
+    __block NSError *capturedErr = nil;
+    __block BOOL timedOut = NO;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
 
@@ -63,17 +68,23 @@ static NSData *syncGET(NSString *url, NSString *range, NSInteger *outCode,
           completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         body = data;
         code = [resp isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)resp statusCode] : 0;
-        if (outErr) *outErr = err;
+        capturedErr = err;
         dispatch_semaphore_signal(sem);
     }];
     [t resume];
 
     if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC))) != 0) {
-        if (outErr) *outErr = [NSError errorWithDomain:@"test" code:1 userInfo:@{NSLocalizedDescriptionKey: @"超时"}];
+        timedOut = YES;
+        [t cancel];
+    }
+    if (timedOut) {
+        if (outErr) *outErr = [NSError errorWithDomain:@"test" code:1
+                                             userInfo:@{NSLocalizedDescriptionKey: @"超时"}];
         if (outCode) *outCode = 0;
         if (outSeconds) *outSeconds = 180.0;
         return nil;
     }
+    if (outErr)     *outErr = capturedErr;
     if (outCode)    *outCode = code;
     if (outSeconds) *outSeconds = [NSDate timeIntervalSinceReferenceDate] - t0;
     return body;
@@ -105,14 +116,14 @@ int main(int argc, char *argv[])
             CHECK(swapped != nil, "换 host 返回 nil");
             CHECK([BSPCdnPool hostOf:swapped] != nil &&
                   [[BSPCdnPool hostOf:swapped] isEqualToString:@"upos-sz-mirrorcos.bilivideo.com"],
-                  "换 host 后 host 不对: %@", [BSPCdnPool hostOf:swapped]);
+                  "换 host 后 host 不对: %s", [BSPCdnPool hostOf:swapped].UTF8String ?: "?");
             CHECK([swapped rangeOfString:@"upgcxcode"].location != NSNotFound, "换 host 丢了 path");
             CHECK([swapped rangeOfString:@"hdnts=abc"].location != NSNotFound, "换 host 丢了 query");
             CHECK([swapped hasPrefix:@"https://"], "换 host 丢了 scheme");
 
             /* 端口形式（测试用） */
             NSString *p = [BSPCdnPool url:@"http://127.0.0.1:1234/a/b?x=1" withHost:@"127.0.0.1:9999"];
-            CHECK([p isEqualToString:@"http://127.0.0.1:9999/a/b?x=1"], "带端口换 host 结果=%@", p);
+            CHECK([p isEqualToString:@"http://127.0.0.1:9999/a/b?x=1"], "带端口换 host 结果=%s", p.UTF8String ?: "?");
         }
 
         printf("\n[2] 媒体 URL 判定\n");
@@ -136,7 +147,7 @@ int main(int argc, char *argv[])
         NSString *origURL = [NSString stringWithFormat:@"http://127.0.0.1:%d/fixture.m4s", basePort];
         NSString *localURL = [proxy localURLFor:origURL];
         CHECK(localURL.length > 0, "localURLFor 返回空");
-        printf("     本地 URL %@\n", localURL);
+        printf("     本地 URL %s\n", localURL.UTF8String ?: "?");
         CHECK([[proxy originalURLForLocal:localURL] isEqualToString:origURL], "反解不一致");
         CHECK([[proxy localURLFor:origURL] isEqualToString:localURL], "token 不幂等");
 
@@ -145,7 +156,8 @@ int main(int argc, char *argv[])
         printf("\n[4] 单链路基线\n");
         NSInteger baseCode = 0; double baseSec = 0; NSError *baseErr = nil;
         NSData *baseBody = syncGET(origURL, range, &baseCode, &baseSec, &baseErr);
-        CHECK(baseCode == 206 || baseCode == 200, "基线状态码 %ld err=%@", (long)baseCode, baseErr);
+        CHECK(baseCode == 206 || baseCode == 200, "基线状态码 %ld err=%s",
+              (long)baseCode, baseErr.localizedDescription.UTF8String ?: "(无)");
         CHECK(baseBody.length == (NSUInteger)gSize,
               "基线长度 %lu 期望 %lld", (unsigned long)baseBody.length, (long long)gSize);
         if (baseBody.length == (NSUInteger)gSize) {
@@ -157,7 +169,8 @@ int main(int argc, char *argv[])
         printf("\n[5] 经代理并发抓取\n");
         NSInteger pCode = 0; double pSec = 0; NSError *pErr = nil;
         NSData *pBody = syncGET(localURL, range, &pCode, &pSec, &pErr);
-        CHECK(pCode == 206, "代理状态码 %ld（期望 206）err=%@", (long)pCode, pErr);
+        CHECK(pCode == 206, "代理状态码 %ld（期望 206）err=%s",
+              (long)pCode, pErr.localizedDescription.UTF8String ?: "(无)");
         CHECK(pBody.length == (NSUInteger)gSize,
               "代理长度 %lu 期望 %lld", (unsigned long)pBody.length, (long long)gSize);
         if (pBody.length == (NSUInteger)gSize) {
@@ -180,7 +193,7 @@ int main(int argc, char *argv[])
             NSString *mid = [NSString stringWithFormat:@"bytes=%lld-%lld", (long long)s, (long long)e];
             NSInteger c = 0; double sec = 0; NSError *err = nil;
             NSData *b = syncGET(localURL, mid, &c, &sec, &err);
-            CHECK(c == 206, "中段状态码 %ld err=%@", (long)c, err);
+            CHECK(c == 206, "中段状态码 %ld err=%s", (long)c, err.localizedDescription.UTF8String ?: "(无)");
             CHECK(b.length == (NSUInteger)(e - s + 1),
                   "中段长度 %lu 期望 %lld", (unsigned long)b.length, (long long)(e - s + 1));
             if (b.length) CHECK(verifyRecipe(b, s), "中段内容不符配方");
@@ -192,7 +205,7 @@ int main(int argc, char *argv[])
             NSString *open = [NSString stringWithFormat:@"bytes=%lld-", (long long)s];
             NSInteger c = 0; double sec = 0; NSError *err = nil;
             NSData *b = syncGET(localURL, open, &c, &sec, &err);
-            CHECK(c == 206, "开放 Range 状态码 %ld err=%@", (long)c, err);
+            CHECK(c == 206, "开放 Range 状态码 %ld err=%s", (long)c, err.localizedDescription.UTF8String ?: "(无)");
             CHECK(b.length == (NSUInteger)(gSize - s),
                   "开放 Range 长度 %lu 期望 %lld", (unsigned long)b.length, (long long)(gSize - s));
             if (b.length) CHECK(verifyRecipe(b, s), "开放 Range 内容不符配方");
@@ -202,7 +215,8 @@ int main(int argc, char *argv[])
         {
             NSInteger c = 0; double sec = 0; NSError *err = nil;
             NSData *b = syncGET(localURL, nil, &c, &sec, &err);
-            CHECK(c == 206 || c == 200, "无 Range 状态码 %ld err=%@", (long)c, err);
+            CHECK(c == 206 || c == 200, "无 Range 状态码 %ld err=%s",
+                  (long)c, err.localizedDescription.UTF8String ?: "(无)");
             CHECK(b.length == (NSUInteger)gSize,
                   "无 Range 长度 %lu 期望 %lld", (unsigned long)b.length, (long long)gSize);
             if (b.length == (NSUInteger)gSize) CHECK(verifyRecipe(b, 0), "无 Range 内容不符配方");
