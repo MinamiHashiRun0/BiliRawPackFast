@@ -24,7 +24,7 @@ include $(THEOS)/makefiles/common.mk
 LIBRARY_NAME = BiliProbe
 
 BiliProbe_FILES = BiliProbe.m BSSidxIndex.m BSSidxCore.c BSSegmentFetcher.m \
-                  BSPDynamicHook.m BSPCdnPool.m BSPProxyServer.m bsp_ms_core.c
+                  BSPDynamicHook.m BSPCdnPool.m BSPProxyServer.m bsp_ms_core.c bsp_enctypes.c
 BiliProbe_FRAMEWORKS = Foundation UIKit AVFoundation
 BiliProbe_CFLAGS = -fobjc-arc -O2 -Wall -Wno-unused-parameter
 BiliProbe_LDFLAGS = -Wl,-install_name,@executable_path/Frameworks/BiliProbe.dylib

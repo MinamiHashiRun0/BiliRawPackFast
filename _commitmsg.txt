@@ -1,0 +1,36 @@
+fix(hook): 修 encoding 解析器 —— 它让上一版整个包空转，且从没被测试过
+
+真机日志（第 9 次）显示：22 个播放器 hook、23 个阶段 2/3 hook、全网 resume
+hook 全部安装失败（清一色 ✗），只有回环代理起来了。整个包是空转的。
+
+根因在 bsp_arg_shapes（内联在 BSPDynamicHook.m 里，从未被执行验证过）。
+
+ObjC method type encoding 是「类型 + 数字」交替的，以 v24@0:8@16 为例：
+  第 1 段 v   + 数字 24  = 返回值 void，24 是整个栈帧大小
+  第 2 段 @   + 数字 0   = self，起始偏移 0
+  第 3 段 :   + 数字 8   = _cmd，起始偏移 8
+  第 4 段 @   + 数字 16  = 第一个真实参数，起始偏移 16
+
+两处错：
+  1) 解析器没跳过这些「大小/偏移」数字，把它们当成了类型字符；
+  2) 还把第一个类型（返回值）当成了 self，索引整体错位一位。
+于是 v24@0:8@16 被解析成 "60:8@" 之类，与期望的 "@" 永不相等，
+所有带 expectShapes 的 hook 全部被自己的校验拒绝安装。
+
+更糟的是拒绝原因走的是 NSLog —— 侧载 App 里不进 Documents 下的日志，
+所以真机日志里只剩一片 ✗，完全看不出为什么。
+
+修法（不只修 bug，还要让这类 bug 不可能再悄悄发生）：
+- 解析逻辑抽成纯 C 的 bsp_enctypes.c，配 55 条从真机 classes.txt 逐字节
+  导出的夹具做单测（_recon/gen_enc_fixtures.py 生成，不手写，避免抄错），
+  新增 CI job verify-enctypes 在 Linux 上跑。
+- 启动时加金丝雀：拿 6 条真机 encoding 过一遍解析器，不对就当场喊出来。
+- BSPDynamicHook 增加日志出口，所有诊断（含形状不符时打印 enc/实际/期望）
+  改走探针的文件日志。
+- 顺带修 BSPDynamicHook 里一处隐患：method_setImplementation 换成
+  class_replaceMethod —— class_getInstanceMethod 可能返回父类方法，
+  直接改会污染父类。
+- 修正 applyTo: 的期望形状：^v 改成 ^（指针后跟聚合体时只取 ^）。
+
+本地先用 _recon/enctypes_model.py（同一套逻辑的 Python 版 + 同一份夹具文件）
+核对过全部期望值，再推 CI。

@@ -29,6 +29,11 @@ typedef void (^BSPHookHandler)(NSInvocation *inv, BOOL *skipOriginal);
 /* 在原始实现返回之后调用，可读改返回值（setReturnValue:） */
 typedef void (^BSPHookAfter)(NSInvocation *inv);
 
+/* 让宿主把 hook 器的诊断信息接进自己的日志文件。
+ * 必需：NSLog 在侧载 App 里不会进 Documents 下的日志，上一版所有 hook 拒绝
+ * 安装的原因都因此丢失，真机日志里只剩一片 ✗。 */
+void BSPDynamicHookSetLogSink(void (^sink)(NSString *msg));
+
 @interface BSPDynamicHook : NSObject
 
 /* 安装一个 hook。返回 YES 表示成功；NO 表示类/方法不存在或类自带 forwardInvocation: */

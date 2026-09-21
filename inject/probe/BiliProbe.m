@@ -44,6 +44,7 @@
 #import "BSPDynamicHook.h"
 #import "BSPCdnPool.h"
 #import "BSPProxyServer.h"
+#import "bsp_enctypes.h"
 
 // 构建身份由 Theos Makefile 通过 -D 传入。这里给兜底，
 // 使本文件在 Theos 之外（例如 macOS 上直接用 clang 编译做语法检查）也能编译。
@@ -2079,7 +2080,45 @@ static NSString *ProbePlayerSnapshot(void) {
 
 + (void)probe_installPositiveControls
 {
+    // hook 器的诊断必须进 trace.log。上一版它们走 NSLog（侧载 App 里不进文件），
+    // 于是「22 个 hook 全部拒绝安装」这件事在真机日志里只剩一片 ✗，看不出原因。
+    BSPDynamicHookSetLogSink(^(NSString *msg) { PLog(@"hook", @"%@", msg); });
+
     PLog(@"hook", @"──── 阶段 0：播放正证据 + 全网观测 ────");
+
+    // ---- 解析器自检（金丝雀）----
+    //
+    // 上一版整个包空转，根因就是 encoding 解析器有 bug，而它**从来没有被验证过**。
+    // 现在解析器有了 Linux 单测（55 条真机夹具），这里再加一道运行时金丝雀：
+    // 每次启动拿几条真机 encoding 过一遍，不对就当场喊出来。
+    {
+        struct { const char *enc; const char *want; } canary[] = {
+            {"v24@0:8@16",                "@"},        /* 单对象参数 */
+            {"v16@0:8",                   ""},         /* 无参数 */
+            {"B28@0:8@16B24",             "@B"},       /* 对象 + BOOL */
+            {"@48@0:8i16i20@24q32i40i44", "ii@qii"},   /* DASH 构造，六参混合 */
+            {"v20@0:8B16",                "B"},        /* BOOL 参数 */
+            {"v24@0:8^{IjkMediaPlayer=}16", "^"},      /* 结构体指针 */
+        };
+        BOOL ok = YES;
+        NSMutableString *detail = [NSMutableString string];
+        for (NSUInteger i = 0; i < sizeof(canary) / sizeof(canary[0]); i++) {
+            char got[96];
+            int n = bsp_enc_shapes(canary[i].enc, got, sizeof(got));
+            BOOL good = (n >= 0) && (strcmp(got, canary[i].want) == 0);
+            if (!good) {
+                ok = NO;
+                [detail appendFormat:@"\n      %s -> 得到\"%s\" 期望\"%s\"",
+                    canary[i].enc, n < 0 ? "(解析失败)" : got, canary[i].want];
+            }
+        }
+        if (ok) {
+            PLog(@"hook", @"✓ encoding 解析器自检通过（6 条真机样本）");
+        } else {
+            PLog(@"hook", @"★★★ encoding 解析器自检**失败** —— 所有带形状校验的 hook "
+                          @"都会被误杀、整个包会空转。请把这份日志发回。%@", detail);
+        }
+    }
 
     if (!gLivePlayers) {
         gLivePlayers = [NSHashTable hashTableWithOptions:NSPointerFunctionsWeakMemory |
@@ -2109,7 +2148,7 @@ static NSString *ProbePlayerSnapshot(void) {
             {"IJKMediaPlayerWrapper", "start",                                    "",  "包装器启动"},
             {"IJKMediaPlayerWrapper", "prepareWithItem:",                         "@", "包装器准备"},
             {"IJKMediaPlayerItem", "start",                                       "",  "内核 Item 启动"},
-            {"IJKMediaPlayerItem", "applyTo:",                                    "^v", "Item 灌进 C++ 内核"},
+            {"IJKMediaPlayerItem", "applyTo:",                                    "^", "Item 灌进 C++ 内核"},
         };
         for (NSUInteger i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
             [self probe_hookPlayerLifecycle:[NSString stringWithUTF8String:t[i].cls]

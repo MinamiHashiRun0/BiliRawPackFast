@@ -115,6 +115,29 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/srv.pid")" 2>/dev/null || true
           fi
 
+  # ---------------------------------------------------------------- type encoding 解析
+  # 上一版整个包空转，根因就是这段解析逻辑有 bug 且从未被验证过：
+  # 它没跳过 encoding 里的「大小/偏移」数字，还把返回值当成了 self，
+  # 于是所有 expectShapes 校验全部失败、所有 hook 拒绝安装，日志只剩一片 ✗。
+  # 这里用**真机 classes.txt 逐字节导出**的 55 条夹具逐条断言，杜绝再犯。
+  verify-enctypes:
+    name: Verify type-encoding parser (Linux, real device fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile and run encoding tests
+        run: |
+          set -euxo pipefail
+          cd inject/probe
+          clang -std=c11 -Wall -Wextra -Werror -O2 -g \
+                -o /tmp/test_enctypes \
+                test_enctypes.c bsp_enctypes.c
+          echo "编译通过"
+          /tmp/test_enctypes
+
   # ---------------------------------------------------------------- 多 CDN 调度核心
   # 调度器（评分 + 令牌桶 + 分片规划）是纯 C，可在 Linux 上把行为真正跑出来：
   # 公式是否与 stormdl 参考一致、令牌桶是否真的封住了每主机上限、
@@ -175,7 +198,8 @@ jobs:
           clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
                 -isysroot "$SDK" -framework Foundation \
                 -I. -o /tmp/test_proxy_e2e \
-                test_proxy_e2e.m BSPProxyServer.m BSPCdnPool.m BSPDynamicHook.m bsp_ms_core.c
+                test_proxy_e2e.m BSPProxyServer.m BSPCdnPool.m BSPDynamicHook.m \
+                bsp_ms_core.c bsp_enctypes.c
           echo "编译通过"
           /tmp/test_proxy_e2e 18081 4 12582912
 

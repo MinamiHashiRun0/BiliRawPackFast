@@ -1,8 +1,30 @@
 /* BSPDynamicHook.m */
 #import "BSPDynamicHook.h"
+#import "bsp_enctypes.h"
 
 #import <pthread.h>
 #import <string.h>
+
+/* 日志出口。默认 NSLog，但 NSLog 在侧载 App 里**不会**进我们的 trace.log ——
+ * 上一版所有 hook 拒绝安装的原因都走了 NSLog，于是真机日志里只剩一片 ✗，
+ * 完全看不出为什么。现在由探针注入一个写文件的 block。 */
+static void (^gLogBlock)(NSString *msg) = nil;
+
+void BSPDynamicHookSetLogSink(void (^sink)(NSString *msg))
+{
+    gLogBlock = [sink copy];
+}
+
+static void BSPHookLog(NSString *fmt, ...)
+{
+    va_list ap;
+    NSString *msg;
+    va_start(ap, fmt);
+    msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    if (gLogBlock) gLogBlock(msg);
+    else NSLog(@"[BSPDynamicHook] %@", msg);
+}
 
 /* _objc_msgForward：arm64/x86_64 上同名，声明为 C 函数再转 IMP */
 extern void _objc_msgForward(void);
@@ -72,72 +94,12 @@ static BSPHookEntry *bsp_lookup(id target, SEL sel)
 
 #pragma mark - type encoding 解析
 
-/* 返回参数（不含 self/_cmd）的类型首字符数组。
- * 同时把每个参数在 encoding 里的起始偏移写入 offs（可为 NULL）。 */
-static NSInteger bsp_arg_shapes(const char *enc, char *shapes, NSUInteger shapesCap)
-{
-    NSUInteger n = 0;
-    const char *p = enc;
-    int argIndex = 0;
+/* 解析逻辑已抽到 bsp_enctypes.c 并配了单测（真机 encoding 夹具 55 条）。
+ * 之所以必须抽出来测：上一版这段内联代码从没被执行验证过，它有 bug，
+ * 导致**所有**带 expectShapes 的 hook 全部拒绝安装、整个包空转。 */
 
-    if (!p) return -1;
-    if (shapesCap == 0) return -1;
-
-    while (*p) {
-        const char *typeStart;
-        /* 跳过限定符，typeStart 指向「真正的类型字符」 */
-        while (*p == 'r' || *p == 'n' || *p == 'N' || *p == 'o' || *p == 'O' ||
-               *p == 'R' || *p == 'V') p++;
-        if (!*p) break;
-        typeStart = p;
-
-        switch (*p) {
-        case '{': case '(': case '[': {
-            char open = *p;
-            char close = (open == '{') ? '}' : (open == '(' ? ')' : ']');
-            int depth = 0;
-            while (*p) {
-                if (*p == open) depth++;
-                else if (*p == close) { depth--; if (depth == 0) { p++; break; } }
-                p++;
-            }
-            break;
-        }
-        case '^':
-            while (*p == '^') p++;
-            if (*p == '{' || *p == '(' || *p == '[') {
-                char open = *p;
-                char close = (open == '{') ? '}' : (open == '(' ? ')' : ']');
-                int depth = 0;
-                while (*p) {
-                    if (*p == open) depth++;
-                    else if (*p == close) { depth--; if (depth == 0) { p++; break; } }
-                    p++;
-                }
-            } else if (*p) {
-                p++;
-            }
-            break;
-        case 'b':
-            p++;
-            while (*p == '0' || *p == '1') p++;
-            break;
-        default:
-            p++;
-            break;
-        }
-
-        if (argIndex >= 2) {              /* 0=self 1=_cmd */
-            if (n + 1 >= shapesCap) return -1;
-            shapes[n++] = *typeStart;
-        }
-        argIndex++;
-    }
-    shapes[n] = '\0';
-    return (NSInteger)n;
-}
-
-/* 取「限定符之后」的真实类型字符 */
+/* 取「限定符之后」的真实类型字符（用于参数渲染，输入来自 NSMethodSignature，
+ * 不含大小/偏移数字） */
 static char bsp_first_type_char(const char *enc)
 {
     const char *p = enc ? enc : "";
@@ -181,8 +143,8 @@ static void bsp_forward(id self, SEL _cmd, NSInvocation *inv)
     @try {
         if (e.handler) e.handler(inv, &skip);
     } @catch (NSException *ex) {
-        NSLog(@"[BSPDynamicHook] handler 异常 %s::%s -> %@",
-              class_getName(e.cls), sel_getName(e.sel), ex);
+        BSPHookLog(@"handler 异常 %s::%s -> %@",
+                   class_getName(e.cls), sel_getName(e.sel), ex);
     }
 
     if (!skip) {
@@ -200,8 +162,8 @@ static void bsp_forward(id self, SEL _cmd, NSInvocation *inv)
         if (e.after) {
             @try { e.after(inv); }
             @catch (NSException *ex) {
-                NSLog(@"[BSPDynamicHook] after 异常 %s::%s -> %@",
-                      class_getName(e.cls), sel_getName(e.sel), ex);
+                BSPHookLog(@"after 异常 %s::%s -> %@",
+                           class_getName(e.cls), sel_getName(e.sel), ex);
             }
         }
     }
@@ -308,21 +270,40 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
     SEL   sel = NSSelectorFromString(selectorName);
     Method m;
     const char *enc;
-    char actual[64];
+    char actual[96];
     NSString *key;
 
-    if (!cls || !selectorName) return NO;
+    if (!cls) {
+        BSPHookLog(@"· 类 %@ 不在运行时", className);
+        return NO;
+    }
+    if (!selectorName) return NO;
+
     m = class_getInstanceMethod(cls, sel);
-    if (!m) return NO;
+    if (!m) {
+        BSPHookLog(@"✗ %@ 上找不到方法 %@（类存在，但没实现这个方法）", className, selectorName);
+        return NO;
+    }
 
     enc = method_getTypeEncoding(m);
-    if (!enc) return NO;
+    if (!enc) {
+        BSPHookLog(@"✗ %@::%@ 拿不到 type encoding", className, selectorName);
+        return NO;
+    }
 
     if (shapes) {
-        NSInteger n = bsp_arg_shapes(enc, actual, sizeof(actual));
-        if (n < 0 || ![shapes isEqualToString:@(actual)]) {
-            NSLog(@"[BSPDynamicHook] ✗ %@::%@ encoding=%@ 参数形状=%@ 与期望 %@ 不符，拒绝安装",
-                  className, selectorName, @(enc), n < 0 ? @"(解析失败)" : @(actual), shapes);
+        int n = bsp_enc_shapes(enc, actual, sizeof(actual));
+        if (n < 0) {
+            BSPHookLog(@"✗ %@::%@ enc=%@ 解析失败（encoding 畸形或缓冲不够），拒绝安装",
+                       className, selectorName, @(enc));
+            return NO;
+        }
+        if (![shapes isEqualToString:@(actual)]) {
+            /* 这一行就是上一版缺失的那一行 —— 没有它，真机日志只剩 ✗，
+             * 完全看不出是「方法不存在」还是「形状不符」。 */
+            BSPHookLog(@"✗ %@::%@ 参数形状不符，拒绝安装\n"
+                       @"        enc=%@  实际形状=\"%@\"  期望=\"%@\"",
+                       className, selectorName, @(enc), @(actual), shapes);
             return NO;
         }
     }
@@ -343,7 +324,7 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
         free(list);
         if (owns) {
             [gLock unlock];
-            NSLog(@"[BSPDynamicHook] ✗ %@ 自带 forwardInvocation:，拒绝 hook %@", className, selectorName);
+            BSPHookLog(@"✗ %@ 自带 forwardInvocation:（会与转发器打架），拒绝 hook %@", className, selectorName);
             return NO;
         }
     }
@@ -360,7 +341,7 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
 
     if (!class_addMethod(cls, @selector(forwardInvocation:), (IMP)bsp_forward, "v@:@")) {
         [gLock unlock];
-        NSLog(@"[BSPDynamicHook] ✗ %@ 无法添加 forwardInvocation:，拒绝 hook %@", className, selectorName);
+        BSPHookLog(@"✗ %@ 无法添加 forwardInvocation:，拒绝 hook %@", className, selectorName);
         return NO;
     }
 
