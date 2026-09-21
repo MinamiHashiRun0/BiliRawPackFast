@@ -24,11 +24,11 @@
  * （这是基于实测数值的调整，不是拍脑袋；下一版日志里的「单请求峰值」可以直接
  *   验证调大之后有没有真的变快。） */
 static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 */
-static const NSInteger kWindow           = 16;            /* 每连接的并发窗口 */
+static const NSInteger kWindow           = 24;            /* 每连接的并发窗口 */
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
-static const NSInteger kMaxInflightPerHost = 3;           /* 每主机在途分片上限（防连接风暴） */
+static const NSInteger kMaxInflightPerHost = 4;           /* 每主机在途分片上限（防连接风暴） */
 static const NSInteger kChunkRetries     = 1;             /* 单个分片最多换几台重试 */
-static const double   kFirstChunkTimeout = 2.5;           /* 首片超过这么久就 fail-open 回源 */
+static const double   kFirstChunkTimeout = 4.0;           /* 首片超过这么久就 fail-open 回源 */
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
 static const int      kRecvTimeoutSec    = 15;
 
@@ -152,8 +152,11 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) NSUInteger redirects;
 @property (nonatomic, assign) int64_t servedBytes;       /* 累计发给客户端 */
 @property (nonatomic, assign) double servedSeconds;      /* 累计传输耗时 */
+@property (nonatomic, assign) NSTimeInterval firstRequestAt; /* 第一个请求到达 */
+@property (nonatomic, assign) NSTimeInterval lastCompleteAt; /* 最后一个请求送完 */
 @property (nonatomic, assign) NSUInteger completedRequests;
 @property (nonatomic, assign) double peakMiBps;
+@property (nonatomic, assign) BOOL anyHostMeasured;   /* 是否已有真实测速样本 */
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, assign) BSPMSPlanner *planner;  /* 全局共享，跨请求学习 */
 @property (nonatomic, strong) NSMutableArray<NSString *> *hosts;
@@ -180,6 +183,7 @@ static NSSet *kDropReqHeaders(void)
         _lock       = [[NSLock alloc] init];
         _hosts      = [NSMutableArray array];
         _hostIndex  = [NSMutableDictionary dictionary];
+        _rewriteActive = YES;   /* 缺省开；设置面板可运行期关掉 */
     }
     return self;
 }
@@ -391,6 +395,53 @@ static NSSet *kDropReqHeaders(void)
 - (NSUInteger)rewrittenURLCount { return _rewrittenCount; }
 - (NSUInteger)totalRequests    { return _totalRequests; }
 
+- (NSInteger)chunkKiB { return (NSInteger)(kChunkBytes / 1024); }
+- (NSInteger)windowSize { return kWindow; }
+
+#pragma mark - 设置面板接口
+
+- (NSArray<NSDictionary *> *)hostSnapshot
+{
+    NSMutableArray *out = [NSMutableArray array];
+    [_lock lock];
+    for (NSUInteger i = 0; i < _hosts.count; i++) {
+        NSString *h = _hosts[i];
+        BSPProxyHostStat *st = _hostStats[h];
+        double speed = (st && st.seconds > 0.05) ? (double)st.bytes / st.seconds / 1048576.0 : 0.0;
+        BOOL enabled = _planner ? bsp_ms_is_healthy(_planner, (int)i) : YES;
+        [out addObject:@{
+            @"host":    h,
+            @"enabled": @(enabled),
+            @"bytes":   @(st ? st.bytes : 0),
+            @"ok":      @(st ? st.ok : 0),
+            @"fail":    @(st ? st.fail : 0),
+            @"speed":   @(speed),
+        }];
+    }
+    [_lock unlock];
+    return out;
+}
+
+- (void)setHost:(NSString *)host enabled:(BOOL)enabled
+{
+    if (!host.length) return;
+    [_lock lock];
+    {
+        NSNumber *n = _hostIndex[host];
+        if (n && _planner) bsp_ms_set_healthy(_planner, n.intValue, enabled ? 1 : 0);
+    }
+    [_lock unlock];
+}
+
+- (void)enableAllHosts
+{
+    [_lock lock];
+    if (_planner) {
+        for (int i = 0; i < bsp_ms_host_count(_planner); i++) bsp_ms_set_healthy(_planner, i, 1);
+    }
+    [_lock unlock];
+}
+
 /// URL 的紧凑写法：host + 末段路径。日志里塞完整签名 URL 会把有用信息淹掉。
 - (NSString *)shortURL:(NSString *)url
 {
@@ -401,44 +452,47 @@ static NSSet *kDropReqHeaders(void)
 
 /// 一行式吞吐摘要，供心跳与结论段使用。
 ///
-/// 这里刻意给出一个**不需要人来主观判断**的量化指标：并发收益倍数。
-///   分子 = 单个客户端请求里，播放器实际体验到的峰值均速
-///          （代理服务完这一条 Range 的 字节/墙钟时间）
-///   分母 = 本次会话里最快的那台 CDN，单独服务请求时的均速
-/// 两者都是**同一次会话、同一条网络、同一批 CDN** 上测出来的，
-/// 所以比值 > 1 就说明「把一条连接拆到多台 CDN 并发」确实比单台快；
-/// 比值 ≈ 1 说明并发没带来收益（比如瓶颈根本不在单台 CDN 的带宽上）。
-/// 注意它比较的是「经代理」对「单台 CDN」，不是「经代理」对「播放器直连」——
-/// 后者需要关掉改写再跑一遍才能测，属于对照组的事。
+/// 「并发收益」的定义（上一版是错的，这里说清楚）：
+///   分子 = **墙钟聚合吞吐** = 总送达字节 ÷ (第一个请求到达 → 最后一个请求送完)
+///   分母 = **单主机最好均速**，但只统计**成功≥3 片**的主机
+///
+/// 上一版写成「单请求峰值 ÷ 最快单主机均速」，结果真机 4K 那次打出 8.01x ——
+/// 分母来自一台只成功过 1 片、样本恰好快的机器（0.5 MiB / 0.75s），
+/// 分子是一次偶然的突发。两个单点相除毫无意义，还给了「效果很好」的错觉。
+/// 现在分母要求至少 3 个样本，分子改成整段时间的聚合，比值才代表
+/// 「把一条连接拆到多台并发」相对「单台能给的」真实倍率。
 - (NSString *)throughputLine
 {
     NSString *s;
     [_lock lock];
     {
         double mib = (double)_servedBytes / 1048576.0;
-        double agg = _servedSeconds > 0.05 ? mib / _servedSeconds : 0.0;
+        double wall = (_lastCompleteAt > _firstRequestAt) ? (_lastCompleteAt - _firstRequestAt) : 0.0;
+        double aggWall = wall > 0.5 ? mib / wall : 0.0;
+        double perReqAvg = _servedSeconds > 0.05 ? mib / _servedSeconds : 0.0;
         double bestHost = 0.0;
         NSString *bestHostName = nil;
         double gain = 0.0;
         for (NSString *k in _hostStats) {
             BSPProxyHostStat *st = _hostStats[k];
-            if (st.bytes <= 0 || st.seconds <= 0.01) continue;
+            if (st.bytes <= 0 || st.seconds <= 0.05) continue;
+            if (st.ok < 3) continue;              /* 样本太少，不算 */
             {
                 double sp = (double)st.bytes / st.seconds / 1048576.0;
                 if (sp > bestHost) { bestHost = sp; bestHostName = st.host; }
             }
         }
-        if (bestHost > 0.001 && _peakMiBps > 0.001) gain = _peakMiBps / bestHost;
+        if (bestHost > 0.001 && aggWall > 0.001) gain = aggWall / bestHost;
 
         s = [NSString stringWithFormat:
              @"代理：请求=%lu 完成=%lu 上游分片=%lu 失败=%lu 302回源=%lu | "
-             @"送达 %.2f MiB 累计均速 %.2f MiB/s 单请求峰值 %.2f MiB/s | "
-             @"最快单主机 %@ %.2f MiB/s → 并发收益 %.2fx | 重写URL=%lu",
+             @"送达 %.2f MiB  墙钟聚合 %.2f MiB/s  单请求均 %.2f MiB/s | "
+             @"最快单主机 %@ %.2f MiB/s（≥3 片样本）→ 并发收益 %.2fx | 重写URL=%lu",
              (unsigned long)_totalRequests, (unsigned long)_completedRequests,
              (unsigned long)_totalChunks, (unsigned long)_failedChunks,
              (unsigned long)_redirects,
-             mib, agg, _peakMiBps,
-             bestHostName ?: @"(尚未测到)", bestHost,
+             mib, aggWall, perReqAvg,
+             bestHostName ?: @"(样本不足)", bestHost,
              gain,
              (unsigned long)_rewrittenCount];
     }
@@ -671,6 +725,9 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
      *   真机日志里「0.35 MiB / 0.00s = 0.00 MiB/s」就是这个 bug。
      * 从请求到达算起，测到的才是**播放器真实等待的时间**，也正是我们要比较的量。 */
     ctx.tRequest = bsp_now();
+    [_lock lock];
+    if (_firstRequestAt <= 0.0) _firstRequestAt = ctx.tRequest;
+    [_lock unlock];
 
     {
         NSString *r = headers[@"range"];
@@ -777,15 +834,17 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
         [_lock lock];
         bsp_ms_tick(_planner, now);
-        /* 第一片固定交给 URL 自己的 host。
+        /* 第一片固定交给 URL 自己的 host —— **但只在冷启动时**。
          *
-         * 为什么：真机日志里出现过连续三次「首片 4 秒未到 -> fail-open 回源」——
-         * 因为冷启动时调度器对所有候选主机都没有测速数据，只能按顺序试，
-         * 撞上几台不响应/掐连接的节点就把关键路径堵死了。
-         * 而 URL 自己的 host 是签名签发方，实测也是最快的那台（2.28 MiB/s）。
-         * 让关键路径从一台**已知可用**的机器起步，之后再由测速数据决定去向。 */
-        if (s == ctx.reqStart && ctx.originHostIdx >= 0 && bsp_ms_is_healthy(_planner, ctx.originHostIdx))
-            hostIdx = ctx.originHostIdx;
+         * 冷启动时调度器对所有候选主机都没有测速数据，只能按顺序试，撞上几台
+         * 不响应或掐连接的节点就会把关键路径堵死。而 URL 自己的 host 是签名签发方，
+         * 已知可用，用它起步最稳。
+         *
+         * 但一旦手上有了任何测速数据，就必须让评分说话：真机 4K 那次连续 6 次
+         * 「首片 4 秒未到 → fail-open 回源」，全都发生在被固定指定的那台 host 上
+         * —— 说明「签发方」并不总是最快的那个。 */
+        if (s == ctx.reqStart && !_anyHostMeasured
+            && ctx.originHostIdx >= 0 && bsp_ms_is_healthy(_planner, ctx.originHostIdx))            hostIdx = ctx.originHostIdx;
         else
             hostIdx = bsp_ms_pick_capped(_planner, need, now);
         if (hostIdx >= 0) wait = bsp_ms_wait_for(_planner, hostIdx, need, now);
@@ -974,8 +1033,12 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     [_lock lock];
     {
         BSPProxyHostStat *s = [self statFor:host];
-        if (ok) { s.bytes += bytes; s.seconds += dt; s.ok++; s.consecutiveErrors = 0; }
-        else    { s.fail++; s.consecutiveErrors++; }
+        if (ok) {
+            s.bytes += bytes; s.seconds += dt; s.ok++; s.consecutiveErrors = 0;
+            if (bytes > 0) _anyHostMeasured = YES;   /* 有真实测速样本了 */
+        } else {
+            s.fail++; s.consecutiveErrors++;
+        }
     }
     [_lock unlock];
 }
@@ -1060,6 +1123,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         _servedBytes += ctx.bytesToClient;
         if (dt > 0.02) _servedSeconds += dt;
         _completedRequests++;
+        _lastCompleteAt = bsp_now();
         if (mbps > _peakMiBps) _peakMiBps = mbps;
         [_lock unlock];
     }

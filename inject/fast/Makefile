@@ -17,7 +17,7 @@ include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = BiliFast
 
-BiliFast_FILES = BiliFast.m \
+BiliFast_FILES = BiliFast.m BiliFastUI.m \
                  ../probe/BSPDynamicHook.m \
                  ../probe/BSPCdnPool.m \
                  ../probe/BSPProxyServer.m \

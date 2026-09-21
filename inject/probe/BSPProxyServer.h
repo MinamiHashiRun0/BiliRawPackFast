@@ -38,6 +38,30 @@ NS_ASSUME_NONNULL_BEGIN
 /* 一行式吞吐摘要（心跳用）：请求/分片/送达字节/累计均速/单请求峰值/改写数 */
 - (NSString *)throughputLine;
 
+/* ------------------------------------------------------------------ */
+/* 设置面板要用的运行时接口                                            */
+/* ------------------------------------------------------------------ */
+/* 每台候选 CDN 的当前状态。字典字段：
+ *   host(NSString) enabled(BOOL) bytes(NSNumber) speedMiBps(NSNumber)
+ *   ok(NSNumber) fail(NSNumber) isOrigin(BOOL)
+ * 顺序与候选池一致（原始 host 排第一）。 */
+- (NSArray<NSDictionary *> *)hostSnapshot;
+
+/* 启停某台 CDN。内部就是把调度器上的 healthy 置 0/1 ——
+ * 这样运行期切换是安全的：在途请求继续用旧索引，新请求立刻按新选择走。 */
+- (void)setHost:(NSString *)host enabled:(BOOL)enabled;
+
+/* 一键把所有候选 CDN 都打开（恢复自动调度） */
+- (void)enableAllHosts;
+
+/* 改写总开关。true=改写，false=完全不动 URL（播放器直连）。
+ * 与启动时读的 mode.txt 是「与」的关系：mode.txt=direct 时此项无效。 */
+@property (nonatomic, assign) BOOL rewriteActive;
+
+/* 并发分片大小 / 并发窗口的当前值（面板显示用） */
+- (NSInteger)chunkKiB;
+- (NSInteger)windowSize;
+
 /* 把代理侧日志接进宿主的日志文件。
  * 必需：NSLog 在侧载 App 里不进 Documents 下的 trace.log，
  * 于是「代理到底跑了多少、多快」这条唯一能量化效果的线索会整条丢失。 */

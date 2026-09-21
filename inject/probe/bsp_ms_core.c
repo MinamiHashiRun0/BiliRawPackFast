@@ -194,7 +194,18 @@ double bsp_ms_score(const BSPMSPlanner *p, int idx)
     if (!p || idx < 0 || idx >= p->n) return 0.0;
     speed    = bsp_ms_mean_speed(p, idx);
     err_pen  = 1.0 / (1.0 + (double)p->h[idx].errors * 0.5);
-    load_fac = 1.0 / (1.0 + (double)p->h[idx].active * 0.1);
+    /* 在途惩罚用 1/(1+active)，不是 1/(1+active*0.1)。
+     *
+     * 真机 4K 实测换来的教训：原来那个 0.1 系数太弱 —— 一台 3 个在途的分片
+     * 只被扣 23%，于是「速度快的那台」无论堆多少在途都照样赢。结果是 50% 的
+     * 流量压在同一台 CDN 上，其余 13 台各只领到 1 片，**并发退化成了单连接**。
+     * 而 4K 需要几 MiB/s，单台给不了 —— 用户看到的卡顿就是这么来的。
+     *
+     * 换成 1/(1+active) 之后：在途 3 个要打 4 折、在途 1 个打 5 折，
+     * 空闲主机必然优先被选中。这样窗口里的分片会摊到所有健康节点上，
+     * 总吞吐才接近「各台之和」而不是「最快那台」。
+     * 速度仍然起作用：快一倍的机器在同等在途数下依然优先。 */
+    load_fac = 1.0 / (1.0 + (double)p->h[idx].active);
     s = (speed + 1.0) * err_pen * load_fac;
     return s;
 }

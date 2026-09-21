@@ -32,9 +32,11 @@ class Host:
         return self.sum / self.speed_len if self.speed_len > 0 else 0.0
 
     def score(self):
+        # 在途惩罚 1/(1+active)：与 bsp_ms_core.c 保持一致。
+        # 原来用 active*0.1 太弱，会让流量堆在一台 CDN 上、并发退化成单连接。
         return ((self.mean() + 1.0)
                 * (1.0 / (1.0 + self.errors * 0.5))
-                * (1.0 / (1.0 + self.active * 0.1)))
+                * (1.0 / (1.0 + self.active)))
 
 
 class Planner:

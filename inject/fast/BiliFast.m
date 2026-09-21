@@ -41,6 +41,7 @@
 #import "BSPDynamicHook.h"
 #import "BSPCdnPool.h"
 #import "BSPProxyServer.h"
+#import "BiliFastUI.h"
 
 #ifndef FAST_BUILD_SHA
 #define FAST_BUILD_SHA "local"
@@ -115,6 +116,18 @@ static void FWriteFile(NSString *name, NSString *content)
 
 static _Atomic(int32_t) gRewriteCount = 0;
 static _Atomic(int32_t) gSeenCount    = 0;
+
+/// 总开关的**运行期**状态。设置面板可以随时改，改完下一个请求就生效，
+/// 不需要重启 App —— 每个 hook 进来先看一眼这个原子量，代价可忽略。
+static _Atomic(BOOL) gEnabled;
+
+static inline BOOL FEnabled(void) { return atomic_load_explicit(&gEnabled, memory_order_relaxed); }
+static void FSetEnabled(BOOL on)
+{
+    atomic_store_explicit(&gEnabled, on, memory_order_relaxed);
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"BiliFastEnabled"];
+    FLog(@"cfg", @"并发加速 %@", on ? @"已开启" : @"已关闭（URL 不再改写）");
+}
 
 /// 遍历包装对象的属性，谁的值是 B 站媒体 URL 就改谁。
 /// 真机确认：网络层读的是 IJKMediaUrlOpenData.url / IJKMediaAsset 里的字段，
@@ -213,6 +226,7 @@ static void FInstallArgHook(NSString *cls, NSString *sel, NSUInteger argIndex, N
         NSString *s;
         id repl;
         (void)skip;
+        if (!FEnabled()) return;                 /* 面板上一关，下一个请求就生效 */
         s = FStringArg(inv, argIndex, NO);
         if (s) {
             if ([BSPCdnPool isMediaURL:s]) {
@@ -243,8 +257,10 @@ static void FInstallGetterHook(NSString *cls, NSString *sel, NSString *shapes)
 {
     if (!NSClassFromString(cls)) return;
     BSPHookAfter after = ^(NSInvocation *inv) {
-        NSString *s = FStringArg(inv, 0, YES);
+        NSString *s;
         id repl;
+        if (!FEnabled()) return;
+        s = FStringArg(inv, 0, YES);
         if (!s || ![BSPCdnPool isMediaURL:s]) return;
         repl = [[BSPProxyServer shared] localURLFor:s];
         if (!repl) return;
@@ -342,9 +358,15 @@ static void BiliFastInit(void)
 
         dispatch_async(dispatch_get_main_queue(), ^{
             @autoreleasepool {
-                if (![BSPProxyServer rewriteEnabled]) {
-                    FLog(@"boot", @"mode.txt=direct —— 本模块本次不做任何改写，App 原样运行");
-                    return;
+                /* 开关初值：mode.txt=direct 是硬关；否则读上次面板里的选择（缺省开） */
+                {
+                    BOOL hardOff = ![BSPProxyServer rewriteEnabled];
+                    BOOL saved = [[NSUserDefaults standardUserDefaults]
+                                    objectForKey:@"BiliFastEnabled"]
+                                    ? [[NSUserDefaults standardUserDefaults] boolForKey:@"BiliFastEnabled"]
+                                    : YES;
+                    FSetEnabled(hardOff ? NO : saved);
+                    if (hardOff) FLog(@"boot", @"mode.txt=direct —— 本次不做任何改写（面板开关也无效）");
                 }
 
                 BSPProxySetLogSink(^(NSString *msg) { FLog(@"proxy", @"%@", msg); });
@@ -420,7 +442,15 @@ static void BiliFastInit(void)
                 }];
 
                 FFlushReport(@"刚启动，尚无数据");
-                FLog(@"boot", @"就绪。看 Documents/%@/report.txt 里的「并发收益」那一行。", kDirName);
+
+                /* ---- 设置面板：悬浮小球 + 三指双击 ----
+                 * 装完就不需要再碰文本文件了。开关立即生效（hook 里读原子量），
+                 * CDN 勾选立即生效（改调度器的 healthy 位）。 */
+                BiliFastInstallUI(^BOOL { return FEnabled(); },
+                                  ^(BOOL on) { FSetEnabled(on); });
+
+                FLog(@"boot", @"就绪。悬浮小球「加速」可打开设置；三指双击屏幕同样打开。");
+                FLog(@"boot", @"报告在 Documents/%@/report.txt", kDirName);
             }
         });
     }

@@ -55,11 +55,13 @@ static void t_score(void)
     CHECK(CLOSE(bsp_ms_score(p, 0), want, 1e-9), "错误后 score=%g 期望 %g", bsp_ms_score(p, 0), want);
     CHECK(bsp_ms_errors(p, 0) == 1, "errors=%d", bsp_ms_errors(p, 0));
 
-    /* 并发惩罚：active=2 -> 1/(1+0.2) = 5/6 */
+    /* 并发惩罚：active=2 -> 1/(1+2) = 1/3
+     * （系数从 0.1 改成 1 是真机 4K 换来的：0.1 太弱会让流量堆在一台 CDN 上，
+     *   并发退化成单连接，见 bsp_ms_score 的注释与 [5c]） */
     bsp_ms_begin(p, 0, 0, 0.0);
     bsp_ms_begin(p, 0, 0, 0.0);
     CHECK(bsp_ms_active(p, 0) == 2, "active=%d", bsp_ms_active(p, 0));
-    want = 2001.0 * (1.0 / 1.5) * (1.0 / 1.2);
+    want = 2001.0 * (1.0 / 1.5) * (1.0 / 3.0);
     CHECK(CLOSE(bsp_ms_score(p, 0), want, 1e-9), "并发后 score=%g 期望 %g", bsp_ms_score(p, 0), want);
 
     bsp_ms_destroy(p);
@@ -287,6 +289,71 @@ static void t_inflight_cap(void)
     bsp_ms_destroy(p);
 }
 
+/* ---------------- 5c. 并发必须摊到所有健康节点（真机 4K 卡顿的根因） ---------------- */
+static void t_spread_across_hosts(void)
+{
+    /* 这条测试对应一次真实故障：
+     * 真机跑 4K 时，14 台健康 CDN 中有 13 台各只领到 1 个分片，50% 的流量压在
+     * 同一台上 —— 并发病变成单连接，而 4K 需要几 MiB/s，单台给不了，于是卡顿。
+     * 根因是在途惩罚系数 0.1 太弱。这里把「必须摊开」固化成断言。 */
+    enum { N = 14, WINDOW = 16 };
+    BSPMSPlanner *p = bsp_ms_create(N, 0, 0);   /* 不限速 */
+    int used[N];
+    int distinct = 0;
+    int maxOnOne = 0;
+
+    printf("[5c] 并发摊到所有健康节点\n");
+    for (int i = 0; i < N; i++) used[i] = 0;
+
+    /* 所有主机同速：此时唯一的区分度就是「谁空闲」，必须轮着来 */
+    for (int i = 0; i < N; i++)
+        for (int k = 0; k < BSP_MS_SPEED_WINDOW; k++)
+            bsp_ms_finish(p, i, 314573, 1.0, 0);   /* ≈0.3 MiB/s */
+
+    for (int i = 0; i < WINDOW; i++) {
+        int h = bsp_ms_pick_capped(p, 262144, 0.0);
+        CHECK(h >= 0, "pick 失败");
+        if (h < 0) break;
+        bsp_ms_begin(p, h, 262144, 0.0);           /* 只 begin 不 finish：模拟在途 */
+        used[h]++;
+    }
+
+    for (int i = 0; i < N; i++) {
+        if (used[i]) distinct++;
+        if (used[i] > maxOnOne) maxOnOne = used[i];
+    }
+    printf("     14 台各领到几片：distinct=%d 单台最多=%d\n", distinct, maxOnOne);
+
+    CHECK(distinct >= 13, "只用到 %d 台主机（应几乎全部）—— 并发病变成单连接", distinct);
+    CHECK(maxOnOne <= 2, "单台拿到 %d 片（应 ≤2）—— 流量堆在一台上", maxOnOne);
+    bsp_ms_destroy(p);
+
+    /* 反向确认：速度差距很大时仍然要偏向快的那台，不能为了摊平而平均主义 */
+    {
+        BSPMSPlanner *q = bsp_ms_create(4, 0, 0);
+        for (int k = 0; k < BSP_MS_SPEED_WINDOW; k++) {
+            bsp_ms_finish(q, 0, 10 * 1048576, 1.0, 0);   /* 10 MiB/s */
+            bsp_ms_finish(q, 1, 1 * 1048576, 1.0, 0);
+            bsp_ms_finish(q, 2, 1 * 1048576, 1.0, 0);
+            bsp_ms_finish(q, 3, 1 * 1048576, 1.0, 0);
+        }
+        {
+            int cnt[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 16; i++) {
+                int h = bsp_ms_pick_capped(q, 262144, 0.0);
+                if (h < 0) break;
+                bsp_ms_begin(q, h, 262144, 0.0);
+                cnt[h]++;
+            }
+            printf("     速差 10:1 时 16 片的分布：%d/%d/%d/%d（快的那台应最多）\n",
+                   cnt[0], cnt[1], cnt[2], cnt[3]);
+            CHECK(cnt[0] > cnt[1], "快主机没有拿到更多（%d vs %d）", cnt[0], cnt[1]);
+            CHECK(cnt[0] >= 4, "快主机只拿到 %d 片，偏置不足", cnt[0]);
+        }
+        bsp_ms_destroy(q);
+    }
+}
+
 /* ---------------- 6. 令牌桶真的封住了每主机上限 ---------------- */
 static void t_caps_enforced(void)
 {
@@ -493,6 +560,7 @@ int main(void)
     t_plan_bounds();
     t_distribution();
     t_inflight_cap();
+    t_spread_across_hosts();
     t_caps_enforced();
     t_single_host_ceiling();
     t_fuzz();
