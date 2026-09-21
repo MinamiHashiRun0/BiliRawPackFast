@@ -34,23 +34,106 @@ static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 *
  *     聚合只有 0.05 MiB/s，反而低于单台的 0.11 MiB/s。
  * 这和 TCP 的拥塞控制是同一个问题，所以用同一套办法：AIMD。
  * 默认 6 是「不冒进」的起点：好网络几轮就涨上去，差网络涨不上去也不会崩。 */
-/* 上限曾被砍到 8，理由是「8 在海外真机触发整机卡死」—— 后来查明那次卡死是
- * noteHost 漏 unlock 造成的必然死锁，与并发量毫无关系（降到 6 一点用没有就是
- * 证据）。所以这条上限砍得没有依据。
+/* 这条上限来回改过好几次，把结论记在这里，免得再绕一圈：
  *
- * 真机 AIMD 日志显示它一直在涨、根本没到顶：
- *     并发窗口 4 → 6（本轮 0.16 MiB/s）
- *     并发窗口 6 → 8（本轮 1.67 MiB/s）   ← 涨了 10 倍，然后被上限掐住
- * 也就是说：不是网络到顶了，是我们不让它继续涨。放开上限，让 AIMD 自己找。 */
-static const NSInteger kWindowStart      = 8;
+ *   · 一度砍到 8，理由是「8 在海外真机触发整机卡死」。后来查明那次卡死是
+ *     noteHost 漏 unlock 造成的必然死锁，与并发量毫无关系（当时把连接数从
+ *     24 降到 6 完全无效，就是明证）。这条依据不成立。
+ *   · 于是放到 24。AIMD 日志确实显示它一直在涨：
+ *         并发窗口 4 → 6（本轮 0.16 MiB/s）
+ *         并发窗口 6 → 8（本轮 1.67 MiB/s）   ← 涨 10 倍，然后被上限掐住
+ *   · 但真机随即反馈「发热严重」。A/B 只验证过 4~8 条连接有收益，24 是外推；
+ *     而多一条连接的成本（无线电占空、TLS 握手、CDN 压力）AIMD 看不见。
+ *
+ * 最终方案：不写死，按档位取 —— 见下面 BSPWindowStart / BSPWindowMax。
+ * 另外 AIMD 的上涨门槛也随窗口变大而提高（BSPGrowThreshold），
+ * 让它在高并发下只为一个像样的收益才肯多开连接。 */
 static const NSInteger kWindowMin        = 2;
-static const NSInteger kWindowMax        = 24;
-/* 4 而不是 6：一轮只要 6 片，短视频会话可能等不到几次调整就播完了 */
+/* 4 而不是 6：一轮只要 4 片，短视频会话可能等不到几次调整就播完了 */
 static const NSInteger kAdaptEveryChunks = 4;
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
 /* 单 host 模式下这个值不参与调度（scheduleMore 给 wait=0，不查在途上限）；
- * 多 host 模式才有意义。8 与窗口上限 24 之间留足余量。 */
+ * 多 host 模式才有意义。 */
 static const NSInteger kMaxInflightPerHost = 8;
+
+/* 并发档位 —— 上限改成按档位取值，不再是编译期常量。
+ *
+ * 起因是真机反馈「发热严重」，而时间点正好卡在把窗口/连接上限抬到 24 之后。
+ * 复盘：A/B 只验证过 4~8 条连接有收益，**放到 24 是我外推的**，没有数据支撑；
+ * 而 AIMD 只看吞吐，看不见多一条连接要付的无线电占空、TLS 握手与 CDN 侧压力。
+ * 所以上限不该由我一个人拍，交给用户按场景选。 */
+static NSString *const kPerfPresetKey = @"BiliFastPerfPreset";
+
+static NSInteger BSPWindowStart(void);
+static NSInteger BSPWindowMax(void);
+static NSInteger BSPMaxConnections(void);
+
+NSInteger BSPPerfPresetGet(void)
+{
+    NSNumber *n = [[NSUserDefaults standardUserDefaults] objectForKey:kPerfPresetKey];
+    NSInteger v = n ? n.integerValue : BSPPerfPresetBalanced;
+    if (v < BSPPerfPresetSaver || v > BSPPerfPresetSpeed) v = BSPPerfPresetBalanced;
+    return v;
+}
+
+NSString *BSPPerfPresetName(NSInteger preset)
+{
+    switch (preset) {
+        case BSPPerfPresetSaver: return @"省电";
+        case BSPPerfPresetSpeed: return @"极速";
+        default:                 return @"均衡";
+    }
+}
+
+void BSPSetPerfPreset(NSInteger preset)
+{
+    if (preset < BSPPerfPresetSaver || preset > BSPPerfPresetSpeed) preset = BSPPerfPresetBalanced;
+    [[NSUserDefaults standardUserDefaults] setInteger:preset forKey:kPerfPresetKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    PLogProxy(@"并发档位 -> %@（窗口 %ld..%ld；连接上限 %ld 需重启 App 生效）",
+              BSPPerfPresetName(preset),
+              (long)BSPWindowStart(), (long)BSPWindowMax(), (long)BSPMaxConnections());
+}
+
+static NSInteger BSPWindowStart(void)
+{
+    switch (BSPPerfPresetGet()) {
+        case BSPPerfPresetSaver: return 2;
+        case BSPPerfPresetSpeed: return 6;
+        default:                 return 4;
+    }
+}
+
+static NSInteger BSPWindowMax(void)
+{
+    switch (BSPPerfPresetGet()) {
+        case BSPPerfPresetSaver: return 6;
+        case BSPPerfPresetSpeed: return 20;
+        default:                 return 12;   /* A/B 真正验证过的范围 */
+    }
+}
+
+static NSInteger BSPMaxConnections(void)
+{
+    switch (BSPPerfPresetGet()) {
+        case BSPPerfPresetSaver: return 4;
+        case BSPPerfPresetSpeed: return 16;
+        default:                 return 8;
+    }
+}
+
+/* 涨窗口的门槛随窗口变大而提高。
+ *
+ * 多一条连接不只是多一份吞吐，还多一份电、热和 CDN 侧压力；而收益是递减的。
+ * 低并发时 +15% 就值得涨；到 12 以上要 +40% 才涨 —— 免得为了几个百分点
+ * 把无线电一直钉在满功率（真机就是这么烫起来的）。 */
+static double BSPGrowThreshold(NSInteger window)
+{
+    if (window <= 4)  return 1.15;
+    if (window <= 8)  return 1.25;
+    if (window <= 12) return 1.40;
+    return 1.60;
+}
 static const NSInteger kChunkRetries     = 1;             /* 回退：2→1，重试越多越容易在卡顿时雪崩 */
 /* 首片超时：这个值直接等于「最坏情况卡多久」——超时后回源，播放器要重新发起请求。
  * 真机 4.0 秒时出现过 6 次回源，累积卡顿接近一分钟；回到 1.5 秒：卡死时尽快回源放行，
@@ -190,7 +273,7 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) double peakMiBps;
 @property (nonatomic, assign) BOOL anyHostMeasured;   /* 是否已有真实测速样本 */
 @property (nonatomic, strong) NSMutableSet<NSString *> *warmHosts;  /* 已建立过连接的 host */
-/* 自适应并发窗口（AIMD）。见文件顶部 kWindowStart 的注释。 */
+/* 自适应并发窗口（AIMD）。上限与启动值都按并发档位取，见 BSPWindowStart 附近。 */
 @property (nonatomic, assign) NSInteger window;
 @property (nonatomic, assign) int64_t adaptBytes;
 @property (nonatomic, assign) double  adaptStart;
@@ -231,7 +314,7 @@ static NSSet *kDropReqHeaders(void)
         _hosts      = [NSMutableArray array];
         _hostIndex  = [NSMutableDictionary dictionary];
         _rewriteActive = YES;   /* 缺省开；设置面板可运行期关掉 */
-        _window     = kWindowStart;
+        _window     = BSPWindowStart();
         _adaptStart = 0.0;
     }
     return self;
@@ -301,14 +384,14 @@ static NSSet *kDropReqHeaders(void)
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         /* 单 host 模式下，绕 per-connection 限速靠的就是"同一 host 多条连接"。
          *
-         * 这个值必须 ≥ kWindowMax，否则窗口涨上去也没用：这里曾经是 6 而窗口
+         * 这个值必须 ≥ 窗口上限，否则窗口涨上去也没用：这里曾经是 6 而窗口
          * 上限是 8，于是窗口到 8 时后 2 个分片卡在等连接，而 ctx.outstanding
          * 已经把它们算成在途 —— 调度器以为自己满载，实际有两条在原地空转。
          *
-         * （曾把这里从 24 回退到 6，是因为 8e61995 版一打视频就整机卡死。
-         *   那个卡死的真因是 noteHost 漏 unlock 的死锁，与连接数无关 ——
-         *   降连接数当时完全无效，正是明证。） */
-        cfg.HTTPMaximumConnectionsPerHost = 24;
+         * 取档位对应值（省电 4 / 均衡 8 / 极速 16）。注意它在 session 创建时
+         * 定死，改档位要重启 App 才生效 —— 面板里对这点有明确提示。
+         * 曾经设过 24，真机反馈发热严重，已收回：A/B 只验证过 4~8 有收益。 */
+        cfg.HTTPMaximumConnectionsPerHost = BSPMaxConnections();
         cfg.timeoutIntervalForRequest     = 20.0;
         cfg.timeoutIntervalForResource    = 180.0;
         cfg.requestCachePolicy            = NSURLRequestReloadIgnoringLocalCacheData;
@@ -1526,7 +1609,8 @@ static const int64_t kBenchBudgetDefault = 2 * 1024 * 1024;
 //
 // 每完成 kAdaptEveryChunks 片评估一次：
 //   有失败/超时  -> 窗口减半（最小 kWindowMin）—— 丢包就是拥塞信号，先退
-//   吞吐提升 ≥15% -> 窗口 +2（最大 kWindowMax）—— 有余量就多用
+//   吞吐提升 ≥ 门槛 -> 窗口 +2（最大 BSPWindowMax()）—— 有余量就多用
+//   门槛随窗口变大而提高（见 BSPGrowThreshold）：高并发下小收益不值得多开连接
 //   其它          -> 保持
 // 这跟 TCP 拥塞控制的思路一致：细管子（家用 WiFi）上会迅速降到很低，
 // 粗管子（蜂窝）上会稳步涨上去。日志会记下每次调整，便于对照。
@@ -1554,8 +1638,8 @@ static const int64_t kBenchBudgetDefault = 2 * 1024 * 1024;
 
                 if (_adaptFails > 0) {
                     _window = MAX(_window / 2, kWindowMin);
-                } else if (prev <= 0.001 || speed > prev * 1.15) {
-                    _window = MIN(_window + 2, kWindowMax);
+                } else if (prev <= 0.001 || speed > prev * BSPGrowThreshold(_window)) {
+                    _window = MIN(_window + 2, BSPWindowMax());
                 }
                 after = _window;
                 changed = (after != before);

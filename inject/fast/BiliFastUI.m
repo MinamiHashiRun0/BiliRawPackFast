@@ -93,7 +93,7 @@
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s
 {
-    if (s == 0) return 2;                        /* 总开关 + 悬浮球 */
+    if (s == 0) return 3;                        /* 总开关 + 并发档位 + 悬浮球 */
     if (s == 1) return 3;                        /* 跟随 / 单 CDN / 多 CDN */
     if (s == 2) return (NSInteger)[BSPCdnPool pickerCandidates].count;
     return 2;                                    /* 指标 + 说明 */
@@ -107,6 +107,27 @@
     c.detailTextLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     if (ip.section == 0) {
+        if (ip.row == 1) {
+            /* 并发档位。上限不写死：多一条连接不只是多一份吞吐，还多一份电和热，
+             * 而 AIMD 只看吞吐看不见电费 —— 真机把窗口放到 24 之后明显发烫。 */
+            NSInteger p = BSPPerfPresetGet();
+            c.textLabel.text = [NSString stringWithFormat:@"并发档位：%@",
+                                BSPPerfPresetName(p)];
+            c.textLabel.textColor = [UIColor systemBlueColor];
+            switch (p) {
+                case BSPPerfPresetSaver:
+                    c.detailTextLabel.text = @"连接 4、窗口 2~6。发热最低，适合长时间看剧";
+                    break;
+                case BSPPerfPresetSpeed:
+                    c.detailTextLabel.text = @"连接 16、窗口 6~20。最快，但明显更费电更烫";
+                    break;
+                default:
+                    c.detailTextLabel.text = @"连接 8、窗口 4~12。A/B 实测过有收益的范围（推荐）";
+                    break;
+            }
+            c.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return c;
+        }
         UISwitch *sw = [[UISwitch alloc] init];
         if (ip.row == 0) {
             c.textLabel.text = @"启用并发加速";
@@ -231,6 +252,16 @@
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip
 {
     [tv deselectRowAtIndexPath:ip animated:YES];
+
+    if (ip.section == 0) {
+        /* 点一下切下一档：省电 -> 均衡 -> 极速 -> 省电 */
+        if (ip.row == 1) {
+            BSPSetPerfPreset((BSPPerfPresetGet() + 1) % 3);
+            [tv reloadSections:[NSIndexSet indexSetWithIndex:0]
+              withRowAnimation:UITableViewRowAnimationNone];
+        }
+        return;                       /* row 0/2 是开关，由开关自己处理 */
+    }
 
     if (ip.section == 1) {
         /* 切换 CDN 使用模式。存 NSUserDefaults，下一个请求就按新模式走，
