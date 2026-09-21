@@ -58,9 +58,40 @@ static const unsigned long long kMaxLogBytes = 2ULL * 1024 * 1024;
 
 static NSString        *gLogDir;
 
-//------------------------------------------------------------------------------
-#pragma mark - 日志（同步写，崩溃时也要留下痕迹）
-//------------------------------------------------------------------------------
+/* 日志写盘队列：**专用串行队列**，所有 FLog 调用把格式化好的行丢进来就返回，
+ * 绝不在调用线程做 open/seek/write/close。
+ *
+ * 为什么必须异步（这是 8e61995/1299eba 两版海外真机整机卡死的根因）：
+ *   旧版 FLogv 在调用线程同步 stat+open+seek+write+close。代理一真干活
+ *   （单 host 模式打同一海外 CDN）后，每片 [proxy] 完成 都触发一次，
+ *   N 个 wc.q 并发线程同时同步写同一文件 → open/NSFileHandle 竞争 + IO 饱和
+ *   → 队列堆积 → 饿死主线程事件投递 → UI 冻死（小球拖不动、不闪退）。
+ *   多 host 旧版没卡只是因为散到国内节点快速失败回源、代理基本空转、日志极少。
+ * 异步后：调用线程只做一次 NSString 拼接 + dispatch_async，零 IO、无锁竞争。 */
+static dispatch_queue_t gLogQueue;
+static NSMutableArray<NSData *> *gLogBuf;
+static dispatch_queue_t gLogBufQueue;
+
+static void FLogFlush(NSMutableArray<NSData *> *batch)
+{
+    if (!batch.count || !gLogDir) return;
+    NSString *path = [gLogDir stringByAppendingPathComponent:kLogName];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+    if (attr && [attr[NSFileSize] unsignedLongLongValue] > kMaxLogBytes) {
+        [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) return;
+    @try {
+        [fh seekToEndOfFile];
+        for (NSData *d in batch) [fh writeData:d];
+    } @catch (__unused NSException *e) {
+    } @finally {
+        [fh closeFile];
+    }
+}
+
 static void FLogv(NSString *tag, NSString *fmt, va_list ap)
 {
     @autoreleasepool {
@@ -69,29 +100,21 @@ static void FLogv(NSString *tag, NSString *fmt, va_list ap)
         df.dateFormat = @"MM-dd HH:mm:ss";
         NSString *line = [NSString stringWithFormat:@"%@ [%@] %@\n",
                           [df stringFromDate:[NSDate date]], tag, body];
+        NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (!d) return;
 
-        if (!gLogDir) return;
-        {
-            NSString *path = [gLogDir stringByAppendingPathComponent:kLogName];
-            NSFileManager *fm = NSFileManager.defaultManager;
-            NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
-            if (attr && [attr[NSFileSize] unsignedLongLongValue] > kMaxLogBytes) {
-                [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        /* 调用线程零阻塞：只入缓冲区。真正的写盘在 gLogQueue 串行做。 */
+        dispatch_barrier_async(gLogBufQueue, ^{
+            if (!gLogBuf) gLogBuf = [NSMutableArray arrayWithCapacity:64];
+            [gLogBuf addObject:d];
+            /* 攒够 N 行或字节量再刷盘，避免每行一次 open/close；
+             * 但 boot/cfg 这类少量日志也尽快落盘（少于阈值时也触发，保证启动日志可见） */
+            if (gLogBuf.count >= 32) {
+                NSMutableArray *snap = gLogBuf;
+                gLogBuf = nil;
+                dispatch_async(gLogQueue, ^{ FLogFlush(snap); });
             }
-            if (![fm fileExistsAtPath:path]) {
-                [line writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
-                return;
-            }
-            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-            if (!fh) return;
-            @try {
-                [fh seekToEndOfFile];
-                [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-            } @catch (__unused NSException *e) {
-            } @finally {
-                [fh closeFile];
-            }
-        }
+        });
     }
 }
 
@@ -350,11 +373,36 @@ static void BiliFastInit(void)
     @autoreleasepool {
         [BSPProxyServer setLogDirName:kDirName];
 
+        /* 建异步日志队列（见 FLogv 注释：同步写盘是两版卡死的根因） */
+        if (!gLogQueue) {
+            gLogQueue = dispatch_queue_create("bilifast.log.write", DISPATCH_QUEUE_SERIAL);
+            gLogBufQueue = dispatch_queue_create("bilifast.log.buf", DISPATCH_QUEUE_CONCURRENT);
+        }
+
         NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *docs = dirs.firstObject ?: NSTemporaryDirectory();
         gLogDir = [docs stringByAppendingPathComponent:kDirName];
         [[NSFileManager defaultManager] createDirectoryAtPath:gLogDir
                                   withIntermediateDirectories:YES attributes:nil error:NULL];
+
+        /* 定时刷盘：缓冲区没攒够 32 行时，每 1 秒强制刷一次，
+         * 保证 boot/cfg/最后的崩溃前日志都能落盘（异步的代价是掉最后几行，
+         * 定时刷把这个代价压到 1 秒内）。 */
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                    dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
+            dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
+                                     (uint64_t)(1 * NSEC_PER_SEC), (uint64_t)(200 * NSEC_PER_MSEC));
+            dispatch_source_set_event_handler(t, ^{
+                NSMutableArray *snap = nil;
+                dispatch_barrier_sync(gLogBufQueue, ^{
+                    if (gLogBuf.count) { snap = gLogBuf; gLogBuf = nil; }
+                });
+                if (snap) dispatch_async(gLogQueue, ^{ FLogFlush(snap); });
+            });
+            dispatch_resume(t);
+        });
 
         /* hosts.txt：每行一台 CDN，覆盖内置候选池。
          * 内置池是按真机实测筛过的，但不同地区/不同时段能用的节点会变，
