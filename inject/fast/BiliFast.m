@@ -211,7 +211,6 @@ static void FInstallArgHook(NSString *cls, NSString *sel, NSUInteger argIndex, N
     if (!NSClassFromString(cls)) return;
     BSPHookHandler before = ^(NSInvocation *inv, BOOL *skip) {
         NSString *s;
-        NSString *orig = nil;
         id repl;
         (void)skip;
         s = FStringArg(inv, argIndex, NO);
