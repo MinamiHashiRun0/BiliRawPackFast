@@ -1126,6 +1126,16 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 - (void)noteHost:(NSString *)host bytes:(int64_t)bytes seconds:(double)dt
               ok:(BOOL)ok warm:(BOOL)warm
 {
+    /* ★ 整段必须在**同一把锁**内完成，绝不能出现第二次 [_lock lock]。
+     *
+     * 这里曾经是海外两版真机整机卡死的真因：第一段 [_lock lock] 之后漏了
+     * [_lock unlock]（commit 7b4f782 加第二段时弄丢的），第二段又 [_lock lock]
+     * —— NSLock **不可重入**，同一线程二次加锁立即永久死锁。
+     * noteHost 在每片成功/失败时都被调用，于是打开视频一瞬间就锁死；
+     * 主线程随后经 hook 回调抢 _lock（localURLFor:）→ 永久阻塞
+     * = UI 冻死、小球拖不动、不闪退。与并发参数无关 —— 这正是把
+     * HTTPMaximumConnectionsPerHost 从 24 降到 6 完全无效的原因。
+     * （605f534 能播，是因为那时 noteHost 只有一段、unlock 配对完整。） */
     [_lock lock];
     {
         BSPProxyHostStat *s = [self statFor:host];
@@ -1136,30 +1146,28 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         } else {
             s.fail++; s.consecutiveErrors++;
         }
+
+        /* ★ 关键：成功也必须配对地 finish 一次。
+         *
+         * 这里曾经漏了整整一个版本：bsp_ms_begin 每次派发都 +1，而 bsp_ms_finish
+         * 只在失败路径调用过 —— **在途计数只增不减**。后果很隐蔽：
+         *   · load_factor = 1/(1+active) 对所有主机一起衰减到接近 0，
+         *     评分之间的比例被压平，分配变得近乎随机
+         *     —— 用户真机上就是「拿到最多分片的那台并不是测速最快的那台」
+         *   · pick_capped 的「在途≥4 就跳过」会永久排除所有主机，上限形同虚设
+         * 冷连接样本（含 DNS+TCP+TLS）不进速度窗口，理由见 fetchChunk 里的注释
+         * ——但即使样本不入窗口，也必须把在途数减回去。 */
+        {
+            int idx = [self hostIndexOfLocked:host];
+            if (idx >= 0 && _planner) {
+                if (ok && warm && bytes > 0 && dt > 0.005)
+                    bsp_ms_finish(_planner, idx, bytes, dt, 0);
+                else
+                    bsp_ms_finish(_planner, idx, 0, 0, 0);
+            }
+        }
     }
-    /* ★ 关键：成功也必须配对地 finish 一次。
-     *
-     * 这里曾经漏了整整一个版本：bsp_ms_begin 每次派发都 +1，而 bsp_ms_finish
-     * 只在失败路径调用过 —— **在途计数只增不减**。后果很隐蔽：
-     *   · load_factor = 1/(1+active) 对所有主机一起衰减到接近 0，
-     *     评分之间的比例被压平，分配变得近乎随机
-     *     —— 用户真机上就是「拿到最多分片的那台并不是测速最快的那台」
-     *   · pick_capped 的「在途≥4 就跳过」会永久排除所有主机，上限形同虚设
-     * 冷连接样本（含 DNS+TCP+TLS）不进速度窗口，理由见 fetchChunk 里的注释。 */
-    if (ok && warm && bytes > 0 && dt > 0.005) {
-        int idx;
-        [_lock lock];
-        idx = [self hostIndexOfLocked:host];
-        if (idx >= 0 && _planner) bsp_ms_finish(_planner, idx, bytes, dt, 0);
-        [_lock unlock];
-    } else {
-        int idx;
-        [_lock lock];
-        idx = [self hostIndexOfLocked:host];
-        /* 即使样本不入窗口，也必须把在途数减回去 */
-        if (idx >= 0 && _planner) bsp_ms_finish(_planner, idx, 0, 0, 0);
-        [_lock unlock];
-    }
+    [_lock unlock];
 }
 
 - (BOOL)isHostWarm:(NSString *)host
