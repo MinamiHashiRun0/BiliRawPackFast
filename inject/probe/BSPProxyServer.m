@@ -67,6 +67,8 @@ static NSString *const kPerfPresetKey = @"BiliFastPerfPreset";
 static NSInteger BSPWindowStart(void);
 static NSInteger BSPWindowMax(void);
 static NSInteger BSPMaxConnections(void);
+/* BSPSetPerfPreset 下面就要用它，而它的本体定义在文件更靠下 —— 必须先声明 */
+static void PLogProxy(NSString *fmt, ...);
 
 NSInteger BSPPerfPresetGet(void)
 {
