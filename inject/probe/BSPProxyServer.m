@@ -34,17 +34,17 @@ static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 *
  *     聚合只有 0.05 MiB/s，反而低于单台的 0.11 MiB/s。
  * 这和 TCP 的拥塞控制是同一个问题，所以用同一套办法：AIMD。
  * 默认 6 是「不冒进」的起点：好网络几轮就涨上去，差网络涨不上去也不会崩。 */
-static const NSInteger kWindowStart      = 8;             /* 单 host 模式下多连接撑量，起点比旧 6 略高 */
+static const NSInteger kWindowStart      = 4;             /* 回退：8 在海外真机触发整机卡死。先 4 保证不卡，再视 A/B 上调 */
 static const NSInteger kWindowMin        = 2;
-static const NSInteger kWindowMax        = 20;
+static const NSInteger kWindowMax        = 8;             /* 回退：20 上限砍半，防连接风暴挤占主线程调度 */
 static const NSInteger kAdaptEveryChunks = 6;             /* 每完成几片评估一次 */
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
-static const NSInteger kMaxInflightPerHost = 4;           /* 每主机在途分片上限（防连接风暴） */
-static const NSInteger kChunkRetries     = 2;             /* 单个分片重试次数（海外 CDN 抖动给一次机会） */
+static const NSInteger kMaxInflightPerHost = 3;           /* 回退：4→3，单 host 多连接下别一次压太多 */
+static const NSInteger kChunkRetries     = 1;             /* 回退：2→1，重试越多越容易在卡顿时雪崩 */
 /* 首片超时：这个值直接等于「最坏情况卡多久」——超时后回源，播放器要重新发起请求。
- * 真机 4.0 秒时出现过 6 次回源，累计卡顿接近一分钟；缩短到 2.5 秒能明显减轻。
- * 大偏移读（4K 文件 64 MB 处）确实可能超过 2.5 秒，但那种情况回源也不亏。 */
-static const double   kFirstChunkTimeout = 2.5;
+ * 真机 4.0 秒时出现过 6 次回源，累积卡顿接近一分钟；回到 1.5 秒：卡死时尽快回源放行，
+ * 宁可更频繁回源（=退回直连）也不要让播放器干等冻住 UI。 */
+static const double   kFirstChunkTimeout = 1.5;
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
 static const int      kRecvTimeoutSec    = 15;
 
@@ -285,10 +285,12 @@ static NSSet *kDropReqHeaders(void)
 
     {
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        /* 单 host 模式下，绕 per-connection 限速靠的就是"同一 host 同时多条连接"。
-         * 必须放宽到 ≥ kWindowMax，否则 window 个并发分片会被 NSURLSession 串行化
-         * 到少数连接上，限速绕不过去。多 host 模式下这个上限也无害。 */
-        cfg.HTTPMaximumConnectionsPerHost = 24;
+        /* 单 host 模式下，绕 per-connection 限速靠的是"同一 host 多条连接"。
+         * 但 8e61995 版曾设 24，海外真机上一打视频就整机卡死（日志断在 A/B
+         * 开始那行，主线程冻死不闪退）——24 路并发建连 + completionHandler 风暴
+         * 把调度挤垮。回退到 6：仍比旧版多 host 的 8 略聚焦，但不再风暴；
+         * 先保证能播，提速效果靠 A/B 数据再调。 */
+        cfg.HTTPMaximumConnectionsPerHost = 6;
         cfg.timeoutIntervalForRequest     = 20.0;
         cfg.timeoutIntervalForResource    = 180.0;
         cfg.requestCachePolicy            = NSURLRequestReloadIgnoringLocalCacheData;
