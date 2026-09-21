@@ -2020,19 +2020,133 @@ static NSString *ProbeStringFromArg(NSInvocation *inv, NSUInteger idx, BOOL isRe
     return nil;
 }
 
-/// 「这个落点收到的参数不是字符串」—— 只记第一次，把真实类型/内容 dump 出来。
-/// 上一版 willOpenUrl: 命中 2 次却毫无输出，就是缺了这一条。
+/// 遍历对象的所有属性，把**值是媒体 URL** 的字段就地改写。
+///
+/// 为什么要有这么个「通用扫描」：
+///   真机日志显示，网络层真正读的不是裸字符串，而是包装对象 ——
+///       IJKMediaPlayerItem::willOpenUrl:   收到 <IJKMediaUrlOpenData>
+///       IJKMediaPlayerItem::updateUrlInfo: 收到 <IJKMediaAsset>
+///   而这两个类的字段名我不知道：它们不在已导出的 classes.txt 里（那份转储有
+///   4000 条上限，被截断了）。继续靠猜字段名只会再浪费一轮。
+///   所以改成：不管字段叫什么，扫一遍，谁的**值**长得像 B 站媒体 URL 就改谁；
+///   同时把整棵对象的字段值 dump 一次进日志，下一轮就有真实结构了。
+///
+/// 安全性：取值/赋值全包在 @try 里（KVC 遇到只读属性、未定义键会抛异常），
+/// 只处理 NSString / NSURL / 字符串数组，其余原样跳过。
+static BOOL ProbeRewriteObjectFields(id obj, NSString *label, NSString *hookKey)
+{
+    static NSMutableSet *dumped = nil;
+    BOOL changed = NO;
+    BOOL wantDump;
+    NSMutableString *dump = [NSMutableString string];
+    NSMutableSet *seenKeys = [NSMutableSet set];
+
+    if (!obj) return NO;
+    if (!dumped) dumped = [NSMutableSet set];
+    @synchronized (dumped) {
+        wantDump = ![dumped containsObject:hookKey];
+        if (wantDump) [dumped addObject:hookKey];
+    }
+
+    for (Class c = object_getClass(obj); c && c != [NSObject class]; c = class_getSuperclass(c)) {
+        unsigned int i, n = 0;
+        objc_property_t *props = class_copyPropertyList(c, &n);
+        for (i = 0; i < n; i++) {
+            NSString *key = @(property_getName(props[i]));
+            id v = nil;
+            if ([seenKeys containsObject:key]) continue;
+            [seenKeys addObject:key];
+            @try { v = [obj valueForKey:key]; } @catch (__unused NSException *ex) { continue; }
+
+            if (wantDump && v) {
+                NSString *d = [v description] ?: @"";
+                if (d.length > 90) d = [[d substringToIndex:90] stringByAppendingString:@"…"];
+                [dump appendFormat:@"\n        .%@ = <%@> %@", key, NSStringFromClass([v class]), d];
+            }
+
+            /* 单个字符串 / NSURL */
+            {
+                NSString *s = nil;
+                if ([v isKindOfClass:NSString.class]) s = v;
+                else if ([v isKindOfClass:NSURL.class]) s = [(NSURL *)v absoluteString];
+                if (s && [BSPCdnPool isMediaURL:s]) {
+                    NSString *orig = s;
+                    NSString *local = [[BSPProxyServer shared] localURLFor:s];
+                    id repl = [v isKindOfClass:NSURL.class] ? [NSURL URLWithString:local] : (id)local;
+                    if (local && repl) {
+                        @try {
+                            [obj setValue:repl forKey:key];
+                            changed = YES;
+                            ProbeLogRewrite(@"rewrite", [hookKey stringByAppendingFormat:@" .%@", key],
+                                            label, orig);
+                        } @catch (NSException *ex) {
+                            PLog(@"rewrite", @"· [%@] %@ .%@ 改不动：%@", label, hookKey, key, ex.reason);
+                        }
+                    }
+                }
+            }
+
+            /* 字符串数组（例如 backupUrls） */
+            if ([v isKindOfClass:NSArray.class]) {
+                NSArray *arr = v;
+                NSMutableArray *newArr = nil;
+                for (NSUInteger k = 0; k < arr.count; k++) {
+                    id e = arr[k];
+                    NSString *s = [e isKindOfClass:NSString.class] ? e :
+                                  ([e isKindOfClass:NSURL.class] ? [(NSURL *)e absoluteString] : nil);
+                    if (!s || ![BSPCdnPool isMediaURL:s]) {
+                        if (newArr) [newArr addObject:e];
+                        continue;
+                    }
+                    if (!newArr) newArr = [arr mutableCopy];
+                    {
+                        NSString *local = [[BSPProxyServer shared] localURLFor:s];
+                        id repl = [e isKindOfClass:NSURL.class] ? [NSURL URLWithString:local] : (id)local;
+                        if (local && repl) {
+                            newArr[k] = repl;
+                            ProbeLogRewrite(@"rewrite",
+                                            [hookKey stringByAppendingFormat:@" .%@[%lu]", key, (unsigned long)k],
+                                            label, s);
+                        }
+                    }
+                }
+                if (newArr) {
+                    @try { [obj setValue:newArr forKey:key]; changed = YES; }
+                    @catch (__unused NSException *ex) {}
+                }
+            }
+        }
+        free(props);
+    }
+
+    if (wantDump) {
+        PLog(@"rewrite", @"◆ [%@] %@ 收到 <%@>，字段全貌：%@",
+             label, hookKey, NSStringFromClass(object_getClass(obj)), dump);
+    }
+    return changed;
+}
+
+/// 「这个落点收到的参数不是字符串」—— 先把参数对象里的 URL 字段挖出来改写，
+/// 再把真实类型与字段值 dump 一次。
 static void ProbeDescribeUnhandledArg(NSInvocation *inv, NSUInteger idx,
                                       NSString *hookKey, NSString *label)
 {
     static NSMutableSet *seen = nil;
     __unsafe_unretained id obj = nil;
     if (!seen) seen = [NSMutableSet set];
+    @try { [inv getArgument:&obj atIndex:idx]; } @catch (__unused NSException *ex) { obj = nil; }
+
+    // 关键一步：先试着把这层包装对象里的 URL 字段挖出来就地改写。
+    // willOpenUrl: 收到的是 IJKMediaUrlOpenData、updateUrlInfo: 收到的是
+    // IJKMediaAsset —— 网络层真正读的就是它们内部的字段，不是裸字符串。
+    if (obj && ProbeRewriteObjectFields(obj, label, hookKey)) {
+        ProbeBump(&gCntMediaUrlRewrite);
+    }
+
     @synchronized (seen) {
         if ([seen containsObject:hookKey]) return;
         [seen addObject:hookKey];
     }
-    @try { [inv getArgument:&obj atIndex:idx]; } @catch (__unused NSException *ex) { obj = nil; }
 
     if (!obj) {
         PLog(@"rewrite", @"· [%@] %@ 收到了 nil（无可改写）", label, hookKey);

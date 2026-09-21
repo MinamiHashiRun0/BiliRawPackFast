@@ -119,6 +119,7 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) BOOL schedulePending;
 @property (nonatomic, assign) BOOL headOnly;
 @property (nonatomic, assign) int64_t bytesToClient;
+@property (nonatomic, assign) NSTimeInterval tRequest;   /* 客户端请求到达的时刻 */
 @property (nonatomic, assign) NSTimeInterval tFirst;
 @property (nonatomic, assign) NSTimeInterval tLast;
 @end
@@ -646,6 +647,15 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     ctx.schedulePending   = NO;
     ctx.bytesToClient = 0;
     ctx.tFirst = ctx.tLast = 0;
+    /* 请求到达时刻：吞吐与「并发收益」都以它为起点。
+     *
+     * 为什么不用「首片写出时刻」当起点（上一版就是这么写的，结果是错的）：
+     *   一个请求常常只切出一个分片（512 KiB），首片到达即全部到达，
+     *   tFirst 与 tLast 在同一条语句里被赋成同一个值 -> 耗时恒为 0
+     *   -> 所有速率都印成 0.00 MiB/s、并发收益 0.00x。
+     *   真机日志里「0.35 MiB / 0.00s = 0.00 MiB/s」就是这个 bug。
+     * 从请求到达算起，测到的才是**播放器真实等待的时间**，也正是我们要比较的量。 */
+    ctx.tRequest = bsp_now();
 
     {
         NSString *r = headers[@"range"];
@@ -1016,14 +1026,14 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     if (ctx.bodyDone) return;
     ctx.bodyDone = YES;
     {
-        double dt = ctx.tLast - ctx.tFirst;
+        double dt = ctx.tLast - ctx.tRequest;      /* 从请求到达到送完：播放器真实等待 */
         double mib = (double)ctx.bytesToClient / 1048576.0;
-        double mbps = dt > 0.05 ? mib / dt : 0.0;
-        PLogProxy(@"完成 %@  %.2f MiB / %.2fs = %.2f MiB/s",
+        double mbps = dt > 0.02 ? mib / dt : 0.0;
+        PLogProxy(@"完成 %@  %.2f MiB / %.3fs = %.2f MiB/s",
                   [self shortURL:ctx.url], mib, dt, mbps);
         [_lock lock];
         _servedBytes += ctx.bytesToClient;
-        _servedSeconds += (dt > 0.05 ? dt : 0.0);
+        if (dt > 0.02) _servedSeconds += dt;
         _completedRequests++;
         if (mbps > _peakMiBps) _peakMiBps = mbps;
         [_lock unlock];
