@@ -289,6 +289,11 @@ jobs:
           if otool -L "$DYLIB" | tail -n +2 | grep -v -E '/System/Library/|/usr/lib/|@executable_path|@rpath'; then
             echo "存在非系统依赖，注入后可能加载失败"; exit 1
           fi
+
+          # 符号表闸门：不得链接期引用 _objc_msgForward 之类的私有符号。
+          # 一旦引用，某个 iOS 版本不再导出它时，dyld 会在加载 dylib 的瞬间
+          # 杀掉进程 —— 连日志目录都建不出来，真机上无法诊断。
+          python3 "$GITHUB_WORKSPACE/_recon/check_dylib_syms.py" "$DYLIB"
           echo "dylib 校验通过"
 
       - name: Package for signing tools

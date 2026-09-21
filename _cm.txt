@@ -1,0 +1,37 @@
+fix(hook): 修继承链陷阱（会用转发入口当原实现 -> 爆栈）+ 去掉链接期私有符号
+
+背景：用户报「装了之后 App 能正常用，但 Documents 下连 biliprobe 文件夹都没有
+（文件夹是构造函数第一行建的）」。这条症状说明 dylib 根本没被加载 ——
+若是加载后崩溃，进程活不下来；若是构造函数跑了，文件夹一定在。
+用户这轮换了安装工具（LCSign 注入原版 IPA），注入步骤静默失败，
+而上一版 hook 全部拒绝安装这件事又让日志只剩一片 ✗，两种故障长得一模一样。
+
+借这次排查把代码里两个真问题一并修掉：
+
+1. 继承链陷阱（真会爆栈闪退）
+   class_getInstanceMethod 会沿继承链找。若祖先类上已经挂过同一选择子，
+   这里拿到的「原实现」其实是 _objc_msgForward。存下来之后 invokeUsingIMP:
+   会重新进入转发 -> 无限递归 -> 爆栈。
+   IJKFFMoviePlayerController 与 FFPlay / AVPlayer 三个类方法表高度重合，
+   若是父子关系，先挂父类再挂子类必然踩中（而上一版因为校验失败，
+   一个都没挂上，所以还没暴露）。
+   修法：安装时发现 orig == 转发入口就拒绝，交给祖先类的 hook 覆盖子类实例；
+   同时在 bsp_forward 里再兜一道，绝不用转发入口当原实现调用。
+   另外每次启动打印被挂类的继承链，不再靠离线猜。
+
+2. 去掉链接期私有符号
+   extern void _objc_msgForward(void); 会产生链接期未定义符号，某个 iOS 版本
+   不再导出它时，dyld 会在加载 dylib 的瞬间杀掉进程 —— 又是「App 打不开、
+   连日志目录都没有」，无法诊断。改成 dlsym 运行时取（bsp_msg_forward），
+   取不到就拒绝安装 hook，dylib 本身照样加载。
+   新增 CI 闸门 _recon/check_dylib_syms.py 防止改回去
+   （第一版闸门自己也有 bug：Mach-O 符号表里 C 符号带下划线前缀，
+   _objc_msgForward 写作 __objc_msgForward，字符串比较永远匹配不上，
+   已修并验证过它能抓到旧 dylib）。
+
+3. 同步日志 + 安装进度标记
+   构造函数第一行、以及每个安装阶段结束都改成同步落盘（PLogSync）。
+   异步日志在进程几毫秒内死掉时会丢，而那几行恰恰是唯一能说明崩在哪的信息。
+   新增 _recon/check_ipa.py 独立校验交付的 IPA：dylib 是否就位、
+   主二进制是否有对应 LC_LOAD_DYLIB、Info.plist 的文件共享开关是否打开
+   （同样修过一个选择错 Info.plist 的 bug：子目录里的同名文件会先被命中）。

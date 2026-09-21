@@ -115,6 +115,40 @@ static void PLog(NSString *tag, NSString *fmt, ...) {
     va_end(ap);
 }
 
+/// 同步落盘的日志：只用于「装 hook」这种一旦崩掉就必须留下痕迹的关键节点。
+/// 普通 PLog 是异步的，进程若在几毫秒内死掉，最后几行会丢 —— 而偏偏就是那几行
+/// 能告诉我们崩在哪里。
+static void PLogSync(NSString *tag, NSString *fmt, ...) {
+    @autoreleasepool {
+        va_list ap; va_start(ap, fmt);
+        NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
+        va_end(ap);
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"HH:mm:ss.SSS";
+        NSString *line = [NSString stringWithFormat:@"%@ [%@] %@\n",
+                          [df stringFromDate:[NSDate date]], tag, body];
+        NSLog(@"[BiliProbe] %@", line);
+        if (gLogDir) {
+            NSString *path = [gLogDir stringByAppendingPathComponent:kLogTrace];
+            NSFileManager *fm = NSFileManager.defaultManager;
+            if (![fm fileExistsAtPath:path])
+                [line writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+            else {
+                NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+                if (fh) {
+                    @try {
+                        [fh seekToEndOfFile];
+                        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+                    } @catch (__unused NSException *e) {
+                    } @finally {
+                        [fh closeFile];
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void ProbeWriteFile(NSString *name, NSString *content) {
     if (!gLogDir || !name) return;
     NSString *path = [gLogDir stringByAppendingPathComponent:name];
@@ -1646,12 +1680,26 @@ static void ProbeInstallOne(Class cls, SEL sel, NSString *tag) {
 
         // ③ 阶段 0：播放正证据 + 全网观测。必须最先装 ——
         //    它决定了后面那些结论到底能不能被信任。
-        [self probe_installPositiveControls];
+        //    每装完一段就**同步**写一行日志：万一某一步把 App 搞崩，
+        //    真机上至少留下「崩在哪一段」的痕迹，而不是什么都没有。
+        PLogSync(@"hook", @"[install] 开始安装阶段 0（正证据 + 全网观测）");
+        @try {
+            [self probe_installPositiveControls];
+            PLogSync(@"hook", @"[install] 阶段 0 完成");
+        } @catch (NSException *ex) {
+            PLogSync(@"hook", @"★★★ 阶段 0 抛异常：%@ — %@", ex.name, ex.reason);
+        }
 
         // ④ 阶段 2/3：回环代理 + URL 改写 hook。
         //    放在这里（而不是延后）的原因：IJK 播放内核与 DASH 分片对象可能在
         //    用户点开视频前就被初始化，hook 必须尽早装。
-        [self probe_installStage23];
+        PLogSync(@"hook", @"[install] 开始安装阶段 2/3（代理 + URL 改写）");
+        @try {
+            [self probe_installStage23];
+            PLogSync(@"hook", @"[install] 阶段 2/3 完成 —— 安装阶段全部走完，未崩溃");
+        } @catch (NSException *ex) {
+            PLogSync(@"hook", @"★★★ 阶段 2/3 抛异常：%@ — %@", ex.name, ex.reason);
+        }
 
         // ⑤ 重型枚举延后 2 秒：此时主程序初始化基本完成，类注册更全，
         //    且不占用冷启动路径
@@ -1986,9 +2034,26 @@ static id ProbeRewriteIfMedia(NSString *s, id original, NSString **outOriginal) 
                            shapes:(NSString *)shapes
                             label:(NSString *)label
 {
-    if (!NSClassFromString(clsName)) {
+    Class c = NSClassFromString(clsName);
+    if (!c) {
         PLog(@"hook", @"· [播放器] %@ 不在运行时", clsName);
         return;
+    }
+    // 打印继承链：IJKFFMoviePlayerController 与 FFPlay / AVPlayer 方法表高度重合，
+    // 若是父子关系，「先挂父类再挂子类」会踩到 _objc_msgForward 当原实现的陷阱。
+    // 与其离线猜，不如每次启动把它打出来。
+    {
+        static NSMutableSet *logged = nil;
+        if (!logged) logged = [NSMutableSet set];
+        @synchronized (logged) {
+            if (![logged containsObject:clsName]) {
+                [logged addObject:clsName];
+                NSMutableArray<NSString *> *chain = [NSMutableArray array];
+                for (Class k = c; k && chain.count < 8; k = class_getSuperclass(k))
+                    [chain addObject:NSStringFromClass(k)];
+                PLog(@"hook", @"· [播放器] 继承链 %@", [chain componentsJoinedByString:@" → "]);
+            }
+        }
     }
     {
         NSString *key = [NSString stringWithFormat:@"%@::%@", clsName, selName];
@@ -2251,11 +2316,21 @@ static void BiliProbeInit(void) {
         NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *docs = dirs.firstObject ?: NSTemporaryDirectory();
         gLogDir = [docs stringByAppendingPathComponent:kProbeDirName];
+        NSError *dirErr = nil;
         [[NSFileManager defaultManager] createDirectoryAtPath:gLogDir
                                   withIntermediateDirectories:YES
                                                    attributes:nil
-                                                        error:NULL];
+                                                        error:&dirErr];
         gLogQueue = dispatch_queue_create("com.biliprobe.log", DISPATCH_QUEUE_SERIAL);
+
+        // 第一行必须同步落盘。它的存在本身就是「dylib 成功加载并执行了构造函数」
+        // 的证据 —— 上一轮真机连目录都没建出来，我们却无法区分是「没注入」
+        // 还是「注入后立刻崩」，就是因为没有任何同步痕迹。
+        PLogSync(@"boot", @"================ BiliProbe 已加载 ================");
+        PLogSync(@"boot", @"日志目录=%@ 建目录错误=%@", gLogDir,
+                 dirErr ? dirErr.localizedDescription : @"(无)");
+        PLogSync(@"boot", @"目录可写=%@",
+                 [[NSFileManager defaultManager] isWritableFileAtPath:gLogDir] ? @"是" : @"否");
 
         // 在 UI 线程装 hook：AVAssetResourceLoader 的使用都在主线程，
         // 主线程安装可避免与 App 初始化竞争

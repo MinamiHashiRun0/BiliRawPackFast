@@ -2,8 +2,28 @@
 #import "BSPDynamicHook.h"
 #import "bsp_enctypes.h"
 
+#import <dlfcn.h>
 #import <pthread.h>
 #import <string.h>
+
+/* _objc_msgForward 用 dlsym 在运行时取，不做链接期依赖。
+ * 为什么：如果这个符号在目标系统上不存在/不导出，链接期引用会让 **dyld 在加载
+ * dylib 的瞬间就杀掉进程** —— 症状是「App 打不开」，而且连构造函数的第一行
+ * （创建日志目录）都跑不到，真机上只剩「什么都没有」，完全无法诊断。
+ * 改成 dlsym 之后，取不到就拒绝安装所有 hook 并大声记日志，dylib 本身照样加载。 */
+static IMP bsp_msg_forward(void)
+{
+    static IMP imp = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h;
+        h = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+        if (h) imp = (IMP)dlsym(h, "_objc_msgForward");
+        if (!imp) imp = (IMP)dlsym(RTLD_DEFAULT, "_objc_msgForward");
+        if (!imp) imp = (IMP)dlsym(RTLD_DEFAULT, "objc_msgForward");
+    });
+    return imp;
+}
 
 /* 日志出口。默认 NSLog，但 NSLog 在侧载 App 里**不会**进我们的 trace.log ——
  * 上一版所有 hook 拒绝安装的原因都走了 NSLog，于是真机日志里只剩一片 ✗，
@@ -26,8 +46,9 @@ static void BSPHookLog(NSString *fmt, ...)
     else NSLog(@"[BSPDynamicHook] %@", msg);
 }
 
-/* _objc_msgForward：arm64/x86_64 上同名，声明为 C 函数再转 IMP */
-extern void _objc_msgForward(void);
+/* 转发入口一律走 bsp_msg_forward()（dlsym 运行时取），不要在这里声明外部符号 ——
+ * 声明了就会产生链接期依赖，符号缺失时 dyld 会在加载 dylib 的瞬间杀掉进程，
+ * 连日志目录都建不出来。 */
 
 /* NSInvocation 的私有但稳定的入口：直接以指定 IMP 调用，不重新派发。
  * 全 iOS 版本存在；下面仍会做 respondsToSelector 兜底。 */
@@ -148,6 +169,16 @@ static void bsp_forward(id self, SEL _cmd, NSInvocation *inv)
     }
 
     if (!skip) {
+        IMP fwd = bsp_msg_forward();
+        if (e.original == fwd) {
+            /* 绝不该发生：原实现就是转发入口，再调一次就是无限递归 -> 爆栈。
+             * 出现说明安装期没拦住（见 hookClass 里的同一道检查）。 */
+            BSPHookLog(@"!! %s::%s 的 original 竟是转发入口，拒绝调用以免递归",
+                       class_getName(e.cls), sel_getName(e.sel));
+            [self doesNotRecognizeSelector:inv.selector];
+            pthread_setspecific(gDepthKey, (void *)(intptr_t)depth);
+            return;
+        }
         if ([inv respondsToSelector:@selector(invokeUsingIMP:)]) {
             [inv invokeUsingIMP:e.original];
         } else {
@@ -157,7 +188,7 @@ static void bsp_forward(id self, SEL _cmd, NSInvocation *inv)
             const char *t = e.types.UTF8String;
             class_replaceMethod(e.cls, e.sel, e.original, t);
             @try { [inv invokeWithTarget:self]; }
-            @finally { class_replaceMethod(e.cls, e.sel, (IMP)_objc_msgForward, t); }
+            @finally { class_replaceMethod(e.cls, e.sel, fwd, t); }
         }
         if (e.after) {
             @try { e.after(inv); }
@@ -291,6 +322,28 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
         return NO;
     }
 
+    /* ★ 继承链陷阱（这一条是真会爆栈的）：
+     * class_getInstanceMethod 会沿继承链找。如果一个祖先类上已经挂过同一个
+     * 选择子，那么这里拿到的「原实现」其实是 _objc_msgForward。把它当成原实现
+     * 存下来，将来 invokeUsingIMP: 会重新进入转发 -> 无限递归 -> 爆栈闪退。
+     * 例：IJKFFMoviePlayerController 与 FFPlay / AVPlayer 三个类名字高度重合，
+     * 若它们是父子关系，先挂父类再挂子类就会踩中。
+     * 正确做法是拒绝安装子类的那一份 —— 祖先类的 hook 本来就会覆盖子类实例。 */
+    {
+        IMP orig = method_getImplementation(m);
+        IMP fwd  = bsp_msg_forward();
+        if (!fwd) {
+            BSPHookLog(@"✗ 运行时拿不到 _objc_msgForward，无法安装任何 hook"
+                       @"（dylib 本身仍正常加载；请把这条日志发回）");
+            return NO;
+        }
+        if (orig == fwd) {
+            BSPHookLog(@"· %@::%@ 在继承链上已被祖先类挂过，跳过（祖先的 hook 已覆盖本类实例）",
+                       className, selectorName);
+            return NO;
+        }
+    }
+
     if (shapes) {
         int n = bsp_enc_shapes(enc, actual, sizeof(actual));
         if (n < 0) {
@@ -357,7 +410,7 @@ static void bsp_append_obj(NSMutableString *s, id obj, NSUInteger maxLen)
 
         /* 必须用 class_replaceMethod：m 可能是父类的方法，
          * method_setImplementation 会改到父类上去，波及所有子类。 */
-        class_replaceMethod(cls, sel, (IMP)_objc_msgForward, enc);
+        class_replaceMethod(cls, sel, bsp_msg_forward(), enc);
         gEntries[key] = e;
         [gOrder addObject:[NSString stringWithFormat:@"%@::%@  [%@]", className, selectorName, @(enc)]];
     }
