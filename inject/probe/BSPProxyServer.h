@@ -35,6 +35,10 @@ NS_ASSUME_NONNULL_BEGIN
 /* 本次会话的统计报告（多行文本，写进 trace.log 的 [perf] 段） */
 - (NSString *)statsReport;
 
+/* 日志目录 {Documents}/biliprobe（会确保存在）。
+ * 公开出来是因为 hooks.txt / mode.txt 这些开关文件都放在这里。 */
++ (NSString *)logDir;
+
 /* 是否把 URL 重写打开（读 Documents/biliprobe/mode.txt，缺省 proxy） */
 + (BOOL)rewriteEnabled;
 /* 运行期统计计数，供 verdict 判断 */

@@ -85,7 +85,7 @@ void BSPDynamicHookSetLogSink(void (^sink)(NSString *msg));
          selector:(NSString *)selectorName
      expectShapes:(nullable NSString *)shapes
         directImp:(IMP)imp
-         storeOld:(IMP * _Nullable)outOld;
+         storeOld:(IMP _Nullable * _Nullable)outOld;
 
 /* 已安装的直连 hook 列表（"Class::sel  [enc] -> 直连"） */
 + (NSArray<NSString *> *)installedDirectHooks;
