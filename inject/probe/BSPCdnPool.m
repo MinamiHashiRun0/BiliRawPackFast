@@ -226,13 +226,18 @@ static void bsp_split_host(NSString *spec, NSString **outHost, NSNumber **outPor
     return out;
 }
 
++ (BOOL)multiHostMode { return gOverrideHosts.count > 0; }
+
 + (NSArray<NSString *> *)effectiveHostsForPlanner
 {
-    NSMutableArray<NSString *> *all = [NSMutableArray array];
-    if (gOverrideHosts.count) return gOverrideHosts;
-    for (NSString *h in [self mainlandMirrors]) if (![all containsObject:h]) [all addObject:h];
-    for (NSString *h in [self overseaHosts])    if (![all containsObject:h]) [all addObject:h];
-    return all;
+    /* 单 host 模式（默认）：不预填候选池。海外用户从马来西亚直连国内 sz 镜像
+     * 多数超时/中断（真机日志 36 次「网络连接已中断」），把分片散过去只会拖慢
+     * 关键路径、触发 fail-open。改为每请求只用它自己的原始 host（通常是海外 CDN），
+     * 多分片并发 = 多条连接打同一海外 CDN = 绕过 per-connection 限速。
+     *
+     * 想用旧「散到多 host」行为：在 Documents/BiliFast/hosts.txt 里写 host 列表，
+     * 即进入多 host 模式，本方法返回该 override。 */
+    return gOverrideHosts ?: @[];
 }
 
 + (NSArray<NSString *> *)seenMediaHosts

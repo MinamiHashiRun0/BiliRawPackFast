@@ -23,12 +23,13 @@
 //
 // 开关（Documents/BiliFast/ 下，改完重启 App 生效）：
 //   mode.txt     写 direct → 完全不改写，退回原样播放
-//   hosts.txt    每行一台 CDN（覆盖内置候选池）
+//   hosts.txt    每行一台 CDN（写了即进入「多 host 模式」，分片散到指定 host；
+//                留空 = 默认「单 host 模式」：多连接打同一海外 CDN 绕限速）
 //
-// 自证：每次会话结束会在日志与 report.txt 里给出「并发收益倍数」。
-//   它 = 播放器实际体验到的峰值均速 ÷ 最快单台 CDN 的均速。
-//   **如果这个数长期 ≤ 1，说明本机网络下单台 CDN 已经不是瓶颈，本模块没有收益，
-//     建议直接卸掉** —— 这句话是模块自己写给你看的，不是客套。
+// 自证：每次会话结束会在日志与 report.txt 里给出收益判断。
+//   单 host 模式靠「A/B 实测」——同一段字节、同一海外 CDN，单连接 vs 4 连接并发，
+//   比值 >1 才说明多连接真的绕过了 per-connection 限速；≤1 则本网络下无收益，
+//   建议关掉或卸载。多 host 模式才用旧的「并发收益倍数」间接指标。
 //==============================================================================
 
 #import <Foundation/Foundation.h>
@@ -310,16 +311,24 @@ static NSString *FSessionReport(NSString *phase)
                 [s appendString:@"\n✓ 并发有效，保持开启即可。\n"];
             }
         } else {
+            /* 没有 A/B 数据。单 host 模式 throughputLine 不含「并发收益」字段
+             * （同 host 多连接，比值恒≈1 无意义），直接告诉用户待 A/B 即可；
+             * 多 host 模式才解析间接指标。 */
             NSString *line = [[BSPProxyServer shared] throughputLine];
-            NSRange r = [line rangeOfString:@"并发收益 "];
-            double gain = 0.0;
-            if (r.location != NSNotFound) gain = [[line substringFromIndex:NSMaxRange(r)] doubleValue];
-            if (gain > 1.05) {
-                [s appendFormat:@"\n（间接指标：并发收益 %.2fx；A/B 实测还没出结果）\n", gain];
-            } else if (gain > 0.01) {
-                [s appendFormat:@"\n（间接指标：并发收益 %.2fx；等 A/B 实测出来再下结论）\n", gain];
+            if ([BSPCdnPool multiHostMode]) {
+                NSRange r = [line rangeOfString:@"并发收益 "];
+                double gain = 0.0;
+                if (r.location != NSNotFound) gain = [[line substringFromIndex:NSMaxRange(r)] doubleValue];
+                if (gain > 1.05) {
+                    [s appendFormat:@"\n（间接指标：并发收益 %.2fx；A/B 实测还没出结果）\n", gain];
+                } else if (gain > 0.01) {
+                    [s appendFormat:@"\n（间接指标：并发收益 %.2fx；等 A/B 实测出来再下结论）\n", gain];
+                } else {
+                    [s appendString:@"\n（本次会话还没有足够样本；A/B 实测通常启动后 45 秒出结果）\n"];
+                }
             } else {
-                [s appendString:@"\n（本次会话还没有足够样本；A/B 实测通常启动后 45 秒出结果）\n"];
+                [s appendString:@"\n（单 host 多连接模式：多连接打同一海外 CDN。"
+                                 @"收益以 A/B 实测为准，通常启动后 45 秒出结果）\n"];
             }
         }
     }

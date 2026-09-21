@@ -34,13 +34,13 @@ static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 *
  *     聚合只有 0.05 MiB/s，反而低于单台的 0.11 MiB/s。
  * 这和 TCP 的拥塞控制是同一个问题，所以用同一套办法：AIMD。
  * 默认 6 是「不冒进」的起点：好网络几轮就涨上去，差网络涨不上去也不会崩。 */
-static const NSInteger kWindowStart      = 6;
+static const NSInteger kWindowStart      = 8;             /* 单 host 模式下多连接撑量，起点比旧 6 略高 */
 static const NSInteger kWindowMin        = 2;
 static const NSInteger kWindowMax        = 20;
 static const NSInteger kAdaptEveryChunks = 6;             /* 每完成几片评估一次 */
 static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
 static const NSInteger kMaxInflightPerHost = 4;           /* 每主机在途分片上限（防连接风暴） */
-static const NSInteger kChunkRetries     = 1;             /* 单个分片最多换几台重试 */
+static const NSInteger kChunkRetries     = 2;             /* 单个分片重试次数（海外 CDN 抖动给一次机会） */
 /* 首片超时：这个值直接等于「最坏情况卡多久」——超时后回源，播放器要重新发起请求。
  * 真机 4.0 秒时出现过 6 次回源，累计卡顿接近一分钟；缩短到 2.5 秒能明显减轻。
  * 大偏移读（4K 文件 64 MB 处）确实可能超过 2.5 秒，但那种情况回源也不亏。 */
@@ -285,7 +285,10 @@ static NSSet *kDropReqHeaders(void)
 
     {
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        cfg.HTTPMaximumConnectionsPerHost = 8;
+        /* 单 host 模式下，绕 per-connection 限速靠的就是"同一 host 同时多条连接"。
+         * 必须放宽到 ≥ kWindowMax，否则 window 个并发分片会被 NSURLSession 串行化
+         * 到少数连接上，限速绕不过去。多 host 模式下这个上限也无害。 */
+        cfg.HTTPMaximumConnectionsPerHost = 24;
         cfg.timeoutIntervalForRequest     = 20.0;
         cfg.timeoutIntervalForResource    = 180.0;
         cfg.requestCachePolicy            = NSURLRequestReloadIgnoringLocalCacheData;
@@ -342,23 +345,35 @@ static NSSet *kDropReqHeaders(void)
     }
 }
 
-/* 全局主机池与调度器：所有 URL 共享，跨请求积累测速与黑名单 */
+/* 全局主机池与调度器：所有 URL 共享，跨请求积累测速与黑名单
+ *
+ * 两种模式（由 BSPCdnPool.multiHostMode 决定，启动时 hosts.txt 是否非空）：
+ *   · 多 host：候选池 = hosts.txt，分片散到指定 host（旧行为，给国内/高级用户）
+ *   · 单 host：候选池空，每个请求只用它自己的原始 host；planner 延迟到第一次
+ *     ensureHost: 时建立（n=BSP_MS_MAX_HOSTS 的空槽），运行时按需 accumulate。
+ *     分片不再换 host，而是多连接打同一海外 CDN 绕 per-connection 限速。 */
 - (void)buildPlanner
 {
     NSMutableArray<NSString *> *all = [[BSPCdnPool effectiveHostsForPlanner] mutableCopy];
-    if (!all) all = [NSMutableArray array];
-
-    _hosts = all;
-    [_hostIndex removeAllObjects];
-    for (NSUInteger i = 0; i < all.count; i++) _hostIndex[all[i]] = @(i);
 
     if (_planner) { bsp_ms_destroy(_planner); _planner = NULL; }
-    _planner = bsp_ms_create((int)all.count, kPerHostCapBps, kPerHostCapBps);
-    /* 每主机在途上限：防止调度器学会哪台快之后把十几个分片同时压过去，
-     * 对端会把过量并发连接直接掐断（真机日志里的「网络连接已中断」）。 */
-    bsp_ms_set_max_inflight(_planner, (int)kMaxInflightPerHost);
-    for (NSUInteger i = 0; i < all.count; i++)
-        bsp_ms_set_host_name(_planner, (int)i, all[i].UTF8String);
+    _hosts = all ?: [NSMutableArray array];
+    [_hostIndex removeAllObjects];
+
+    if (all.count > 0) {
+        /* 多 host 模式：planner 只开 all.count 个槽——pick 遍历的全是真实 host，
+         * 不会选到无名的空健康槽导致 _hosts[idx] 越界。运行时 ensureHost: 遇到
+         * override 池之外的原始 host 时，因 idx>=n 会被 set_host_name 忽略，
+         * 这是预期行为（override 模式就是强制只用指定 host）。 */
+        _planner = bsp_ms_create((int)all.count, kPerHostCapBps, kPerHostCapBps);
+        bsp_ms_set_max_inflight(_planner, (int)kMaxInflightPerHost);
+        for (NSUInteger i = 0; i < all.count; i++) {
+            _hostIndex[all[i]] = @(i);
+            bsp_ms_set_host_name(_planner, (int)i, all[i].UTF8String);
+        }
+    }
+    /* 单 host 模式：_planner 留空，ensureHost: 首次命中时 lazy 建（开
+     * BSP_MS_MAX_HOSTS 槽）。单 host 模式不调 pick，空槽不影响调度。 */
 }
 
 /* URL 的 host 规格（带端口时保留端口，否则主机池与 URL 对不上） */
@@ -383,9 +398,16 @@ static NSSet *kDropReqHeaders(void)
     [_lock lock];
     n = _hostIndex[host];
     if (!n) {
-        int idx = bsp_ms_host_count(_planner);
+        /* 用 _hosts.count 当下标（而非 bsp_ms_host_count）：
+         * 单 host 模式 planner 延迟建立，多 host 模式 planner 开了 BSP_MS_MAX_HOSTS
+         * 槽但只预填了候选池前几个——两种情况下"下一个空槽"都是 _hosts.count。 */
+        int idx = (int)_hosts.count;
         if (idx < BSP_MS_MAX_HOSTS) {
-            bsp_ms_set_host_name(_planner, idx, host.UTF8String);
+            if (!_planner) {
+                _planner = bsp_ms_create(BSP_MS_MAX_HOSTS, kPerHostCapBps, kPerHostCapBps);
+                if (_planner) bsp_ms_set_max_inflight(_planner, (int)kMaxInflightPerHost);
+            }
+            if (_planner) bsp_ms_set_host_name(_planner, idx, host.UTF8String);
             [_hosts addObject:host];
             _hostIndex[host] = @(idx);
             n = @(idx);
@@ -498,15 +520,12 @@ static NSSet *kDropReqHeaders(void)
 
 /// 一行式吞吐摘要，供心跳与结论段使用。
 ///
-/// 「并发收益」的定义（上一版是错的，这里说清楚）：
-///   分子 = **墙钟聚合吞吐** = 总送达字节 ÷ (第一个请求到达 → 最后一个请求送完)
-///   分母 = **单主机最好均速**，但只统计**成功≥3 片**的主机
-///
-/// 上一版写成「单请求峰值 ÷ 最快单主机均速」，结果真机 4K 那次打出 8.01x ——
-/// 分母来自一台只成功过 1 片、样本恰好快的机器（0.5 MiB / 0.75s），
-/// 分子是一次偶然的突发。两个单点相除毫无意义，还给了「效果很好」的错觉。
-/// 现在分母要求至少 3 个样本，分子改成整段时间的聚合，比值才代表
-/// 「把一条连接拆到多台并发」相对「单台能给的」真实倍率。
+/// 「并发收益」语义随模式变：
+///   · 多 host 模式：分子 = 墙钟聚合吞吐，分母 = 单主机最好均速（≥3 片热连接样本），
+///     比值代表「散到多台并发」相对「单台能给的」倍率。
+///   · 单 host 模式：分子分母同一台 host，比值恒≈1 无意义 —— 这里的并发是
+///     「同一海外 CDN 多连接」，收益只能由 A/B 实测（多连接 vs 单连接）回答。
+///     所以单 host 模式标注「待 A/B」，不算 gain，避免打出误导性的 0.45x。
 - (NSString *)throughputLine
 {
     NSString *s;
@@ -519,6 +538,7 @@ static NSSet *kDropReqHeaders(void)
         double bestHost = 0.0;
         NSString *bestHostName = nil;
         double gain = 0.0;
+        BOOL multi = [BSPCdnPool multiHostMode];
         for (NSString *k in _hostStats) {
             BSPProxyHostStat *st = _hostStats[k];
             double sp;
@@ -527,18 +547,21 @@ static NSSet *kDropReqHeaders(void)
             sp = (double)st.warmBytes / st.warmSeconds / 1048576.0;
             if (sp > bestHost) { bestHost = sp; bestHostName = st.host; }
         }
-        if (bestHost > 0.001 && aggWall > 0.001) gain = aggWall / bestHost;
+        if (multi && bestHost > 0.001 && aggWall > 0.001) gain = aggWall / bestHost;
 
         s = [NSString stringWithFormat:
              @"代理：请求=%lu 完成=%lu 上游分片=%lu 失败=%lu 302回源=%lu | "
              @"送达 %.2f MiB  墙钟聚合 %.2f MiB/s  单请求均 %.2f MiB/s | "
-             @"最快单主机 %@ %.2f MiB/s（≥3 片样本）→ 并发收益 %.2fx | 重写URL=%lu",
+             @"%@ | 重写URL=%lu",
              (unsigned long)_totalRequests, (unsigned long)_completedRequests,
              (unsigned long)_totalChunks, (unsigned long)_failedChunks,
              (unsigned long)_redirects,
              mib, aggWall, perReqAvg,
-             bestHostName ?: @"(样本不足)", bestHost,
-             gain,
+             multi
+                ? [NSString stringWithFormat:@"最快单主机 %@ %.2f MiB/s（≥3 片样本）→ 并发收益 %.2fx",
+                   bestHostName ?: @"(样本不足)", bestHost, gain]
+                : [NSString stringWithFormat:@"单 host 多连接模式（%@）实测均速 %.2f MiB/s，收益看 A/B",
+                   bestHostName ?: @"(待测)", bestHost],
              (unsigned long)_rewrittenCount];
     }
     [_lock unlock];
@@ -879,20 +902,26 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
         [_lock lock];
         bsp_ms_tick(_planner, now);
-        /* 第一片固定交给 URL 自己的 host —— **但只在冷启动时**。
-         *
-         * 冷启动时调度器对所有候选主机都没有测速数据，只能按顺序试，撞上几台
-         * 不响应或掐连接的节点就会把关键路径堵死。而 URL 自己的 host 是签名签发方，
-         * 已知可用，用它起步最稳。
-         *
-         * 但一旦手上有了任何测速数据，就必须让评分说话：真机 4K 那次连续 6 次
-         * 「首片 4 秒未到 → fail-open 回源」，全都发生在被固定指定的那台 host 上
-         * —— 说明「签发方」并不总是最快的那个。 */
-        if (s == ctx.reqStart && !_anyHostMeasured
-            && ctx.originHostIdx >= 0 && bsp_ms_is_healthy(_planner, ctx.originHostIdx))            hostIdx = ctx.originHostIdx;
-        else
-            hostIdx = bsp_ms_pick_capped(_planner, need, now);
-        if (hostIdx >= 0) wait = bsp_ms_wait_for(_planner, hostIdx, need, now);
+        if ([BSPCdnPool multiHostMode]) {
+            /* 多 host 模式（hosts.txt 显式开启）：按测速 + 在途评分挑选，旧行为。
+             * 第一片固定交给 URL 自己的 host —— 但只在冷启动时；冷启动调度器对
+             * 所有候选主机都没有测速数据，撞上不响应的节点会堵死关键路径，而 URL
+             * 自己的 host 是签名签发方，已知可用，用它起步最稳。一旦有了测速数据
+             * 就让评分说话。 */
+            if (s == ctx.reqStart && !_anyHostMeasured
+                && ctx.originHostIdx >= 0 && bsp_ms_is_healthy(_planner, ctx.originHostIdx))
+                hostIdx = ctx.originHostIdx;
+            else
+                hostIdx = bsp_ms_pick_capped(_planner, need, now);
+            if (hostIdx >= 0) wait = bsp_ms_wait_for(_planner, hostIdx, need, now);
+        } else {
+            /* 单 host 模式（默认，海外）：不挑 host，全部走原始 host。多分片并发 =
+             * 多条连接打同一海外 CDN，靠 HTTPMaximumConnectionsPerHost 叠带宽绕
+             * per-connection 限速。不检查 healthy——唯一节点被拉黑等于无候选，
+             * 不如继续试，让首片 fail-open 定时器兜底回源（= 直连原始 URL）。 */
+            hostIdx = ctx.originHostIdx;
+            wait = 0.0;
+        }
         if (hostIdx >= 0 && wait <= 0.0) {
         ctx.nextFetch = e + 1;
         ctx.outstanding++;
@@ -929,7 +958,9 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
               host:(NSString *)host
              retry:(NSInteger)retry
 {
-    NSString *upURL = [BSPCdnPool url:ctx.url withHost:host];
+    /* 单 host 模式：不换 host，直接用原始 URL——多分片打同一海外 CDN 才能叠连接
+     * 绕 per-connection 限速。多 host 模式仍换到调度器选中的 host（旧行为）。 */
+    NSString *upURL = [BSPCdnPool multiHostMode] ? [BSPCdnPool url:ctx.url withHost:host] : ctx.url;
     NSMutableURLRequest *r;
     NSTimeInterval t0 = bsp_now();
     BOOL hostWarm;
@@ -1054,14 +1085,17 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             BSPProxyHostStat *st = [self statFor:host];
             st.fail++;
             st.consecutiveErrors++;
-            if (idx >= 0 && st.consecutiveErrors >= kBlacklistErrors && bsp_ms_is_healthy(_planner, idx)) {
+            if (idx >= 0 && st.consecutiveErrors >= kBlacklistErrors
+                && [BSPCdnPool multiHostMode]   /* 单 host 模式不拉黑唯一节点，否则自杀 */
+                && bsp_ms_is_healthy(_planner, idx)) {
                 bsp_ms_set_healthy(_planner, idx, 0);
                 blacklisted = YES;
             }
         }
         _failedChunks++;
         if (retry > 0) {
-            nextHost = bsp_ms_pick(_planner, need, bsp_now());
+            /* 单 host 模式重试同一原始 host（没别的可选）；多 host 模式挑别的 */
+            nextHost = [BSPCdnPool multiHostMode] ? bsp_ms_pick(_planner, need, bsp_now()) : idx;
             if (nextHost >= 0) bsp_ms_begin(_planner, nextHost, need, bsp_now());
         }
     }
@@ -1163,7 +1197,9 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
                 start:(int64_t)s end:(int64_t)e
                  done:(void (^)(int64_t bytes, BOOL ok))done
 {
-    NSString *up = [BSPCdnPool url:url withHost:host];
+    /* 单 host 模式：A/B 也用原始 URL（不换 host），对照的是「同一海外 CDN
+     * 多连接 vs 单连接」，正好回答"多连接能否绕 per-connection 限速"。 */
+    NSString *up = [BSPCdnPool multiHostMode] ? [BSPCdnPool url:url withHost:host] : url;
     NSMutableURLRequest *r;
     if (!up || !_session) { if (done) done(0, NO); return; }
 
@@ -1245,9 +1281,9 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
     if (!_benchURL.length) return;
 
-    /* 选可用节点：优先「有热连接成功记录」的，按实测速度从高到低 */
-    snap = [self hostSnapshot];
-    {
+    if ([BSPCdnPool multiHostMode]) {
+        /* 多 host 模式：选有热连接成功记录的节点，按实测速度从高到低，取前 4 */
+        snap = [self hostSnapshot];
         NSMutableArray<NSDictionary *> *sorted = [[snap filteredArrayUsingPredicate:
             [NSPredicate predicateWithBlock:^BOOL(NSDictionary *d, id bindings) {
                 return [d[@"enabled"] boolValue] && [d[@"ok"] longLongValue] > 0;
@@ -1259,12 +1295,23 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             if (cands.count >= 4) break;
             [cands addObject:d[@"host"]];
         }
+        if (cands.count == 0) {
+            PLogProxy(@"A/B 实测跳过：还没有任何成功过的节点");
+            return;
+        }
+    } else {
+        /* 单 host 模式：A/B = 「同一原始 host 多连接 vs 单连接」。不要求有成功
+         * 记录——哪怕之前全失败，也要测出"多连接是否更快"，这才是决定本模块去留
+         * 的关键数据。host 直接取 benchURL 自己的（就是改写前的真实媒体地址）。 */
+        NSString *orig = [BSPCdnPool hostOf:_benchURL];
+        if (orig.length) [cands addObject:orig];
     }
+    /* 不够 4 个就重复用同一个 —— 单 host 模式下 4 个全是同一台，正是
+     * 「同一 CDN 开 4 条连接」的真实情形，与单连接串行可比。 */
     if (cands.count == 0) {
-        PLogProxy(@"A/B 实测跳过：还没有任何成功过的节点");
+        PLogProxy(@"A/B 实测跳过：拿不到媒体 host");
         return;
     }
-    /* 节点不够 4 台就重复用同一台 —— 那是「单连接」的真实情形，仍然可比 */
     while (cands.count < 4) [cands addObject:cands[0]];
 
     for (i = 0; i < 4; i++) {
@@ -1274,7 +1321,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         [parJobs    addObject:@[cands[(NSUInteger)i], @(s), @(e)]]; /* B：四台各一片 */
     }
 
-    PLogProxy(@"A/B 实测开始：单连接 vs 4 台并发，各 2 MiB（节点 %@）",
+    PLogProxy(@"A/B 实测开始：单连接 vs 4 连接并发，各 2 MiB（host %@）",
               [cands componentsJoinedByString:@", "]);
 
     {
@@ -1289,7 +1336,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
                 double gain = mbpsA > 0.001 ? mbpsB / mbpsA : 0.0;
                 NSString *line = [NSString stringWithFormat:
                     @"A/B 实测：单连接 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
-                    @"  vs  4 台并发 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
+                    @"  vs  4 连接并发 %.2f MiB/s（%.2fs, %lld B, 成功%ld）"
                     @"  → 并发收益 %.2fx%@",
                     mbpsA, secsA, (long long)bytesA, (long)okA,
                     mbpsB, secsB, (long long)bytesB, (long)okB,

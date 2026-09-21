@@ -43,8 +43,15 @@ NS_ASSUME_NONNULL_BEGIN
 /* 仅供测试：关掉「必须是 B 站媒体 URL」的判定 */
 + (void)setMediaCheckDisabled:(BOOL)disabled;
 
-/* 供 BSPProxyServer 构建全局调度器主机池（会尊重 override） */
+/* 供 BSPProxyServer 构建全局调度器主机池。
+ * 单 host 模式（默认，hosts.txt 为空）返回空数组——不预填候选池，
+ * 每个请求只用它自己的原始 host，多分片打同一海外 CDN 拿多连接绕单连接限速。
+ * 多 host 模式（hosts.txt 非空）返回 override 列表，按旧逻辑散到指定 host。 */
 + (NSArray<NSString *> *)effectiveHostsForPlanner;
+
+/* 是否处于多 host 模式（hosts.txt 给了 override）。
+ * 单 host = NO 时调度器不挑 host，全部走原始 URL。 */
++ (BOOL)multiHostMode;
 
 @end
 

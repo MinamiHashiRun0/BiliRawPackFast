@@ -24,6 +24,7 @@
 #include <stdatomic.h>
 
 #import "BSPProxyServer.h"
+#import "BSPCdnPool.h"
 #import "BiliFastUI.h"
 
 //------------------------------------------------------------------------------
@@ -90,8 +91,14 @@
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s
 {
     if (s == 0) return @"并发加速";
-    if (s == 1) return [NSString stringWithFormat:@"CDN 节点（已选 %lu / %lu）",
-                        (unsigned long)[self selectedCount], (unsigned long)self.rows.count];
+    if (s == 1) {
+        if ([BSPCdnPool multiHostMode]) {
+            return [NSString stringWithFormat:@"CDN 节点（已选 %lu / %lu）",
+                    (unsigned long)[self selectedCount], (unsigned long)self.rows.count];
+        }
+        /* 单 host 模式：节点是动态的（每个视频的原始 host），不是可选候选池 */
+        return @"当前 CDN（单 host 多连接模式）";
+    }
     return @"指标与说明";
 }
 
@@ -99,7 +106,9 @@
 {
     if (s == 0) return 2;                        /* 总开关 + 悬浮球 */
     if (s == 1) return (NSInteger)self.rows.count;
-    return 3;                                    /* 指标 / 快捷 / 说明 */
+    /* 单 host 模式不需要「全部启用」（只有一个动态节点）：指标 + 说明 = 2 行
+     * 多 host 模式保留「全部启用」：指标 + 全部启用 + 说明 = 3 行 */
+    return [BSPCdnPool multiHostMode] ? 3 : 2;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip
@@ -145,7 +154,13 @@
         c.textLabel.minimumScaleFactor = 0.65;
         c.detailTextLabel.text = [NSString stringWithFormat:@"均速 %.2f MiB/s   成功 %lld   失败 %lld",
                                   speed, ok, fail];
-        c.accessoryType = on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        /* 单 host 模式：不可勾选，无 checkmark、不可点。多 host 模式才显示勾选态 */
+        c.accessoryType = [BSPCdnPool multiHostMode]
+                            ? (on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone)
+                            : UITableViewCellAccessoryNone;
+        c.selectionStyle = [BSPCdnPool multiHostMode]
+                             ? UITableViewCellSelectionStyleDefault
+                             : UITableViewCellSelectionStyleNone;
         /* 试过但一次都没成的节点标红：一眼看出该关谁 */
         if (fail > 0 && ok == 0) c.detailTextLabel.textColor = [UIColor systemRedColor];
         else if (ok > 0)         c.detailTextLabel.textColor = [UIColor systemGreenColor];
@@ -160,20 +175,32 @@
         c.selectionStyle = UITableViewCellSelectionStyleNone;
         return c;
     }
-    if (ip.row == 1) {
+    if ([BSPCdnPool multiHostMode] && ip.row == 1) {
+        /* 多 host 模式才有「全部启用」行（恢复自动调度） */
         c.textLabel.text = @"全部启用（恢复自动调度）";
         c.textLabel.textColor = [UIColor systemBlueColor];
         c.detailTextLabel.text = @"把所有节点都放回候选池，由实测速度自动分配";
         return c;
     }
-    c.textLabel.text = @"调参";
-    c.detailTextLabel.numberOfLines = 3;
-    c.detailTextLabel.text = [NSString stringWithFormat:
-        @"分片 %ld KiB，并发窗口 %ld\n"
-        @"本页的开关与勾选立即生效；改 hosts.txt / mode.txt 需重启 App",
-        (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
-    c.selectionStyle = UITableViewCellSelectionStyleNone;
-    return c;
+    {
+        /* 说明行：单 host 模式 row 1，多 host 模式 row 2 */
+        c.textLabel.text = @"调参";
+        c.detailTextLabel.numberOfLines = 4;
+        if ([BSPCdnPool multiHostMode]) {
+            c.detailTextLabel.text = [NSString stringWithFormat:
+                @"分片 %ld KiB，并发窗口 %ld（多 host 模式）\n"
+                @"本页的开关与勾选立即生效；改 hosts.txt / mode.txt 需重启 App",
+                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
+        } else {
+            c.detailTextLabel.text = [NSString stringWithFormat:
+                @"单 host 多连接：分片 %ld KiB × 并发窗口 %ld 条连接，"
+                @"打同一海外 CDN 绕 per-connection 限速\n"
+                @"想改回「散到多 host」：在 Documents/BiliFast/hosts.txt 写入.host 列表后重启 App",
+                (long)[[BSPProxyServer shared] chunkKiB], (long)[[BSPProxyServer shared] windowSize]];
+        }
+        c.selectionStyle = UITableViewCellSelectionStyleNone;
+        return c;
+    }
 }
 
 - (void)masterChanged:(UISwitch *)sw
@@ -194,15 +221,20 @@
 {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (ip.section == 1) {
-        NSMutableDictionary *d = self.rows[(NSUInteger)ip.row];
-        BOOL on = ![d[@"enabled"] boolValue];
-        d[@"enabled"] = @(on);
-        [[BSPProxyServer shared] setHost:d[@"host"] enabled:on];
-        [tv reloadSections:[NSIndexSet indexSetWithIndex:1]
-          withRowAnimation:UITableViewRowAnimationNone];
+        /* 单 host 模式：节点是当前视频的原始 host，不可勾选启停
+         * （关掉唯一的 host = 没有候选，毫无意义）。多 host 模式才允许勾选。 */
+        if ([BSPCdnPool multiHostMode]) {
+            NSMutableDictionary *d = self.rows[(NSUInteger)ip.row];
+            BOOL on = ![d[@"enabled"] boolValue];
+            d[@"enabled"] = @(on);
+            [[BSPProxyServer shared] setHost:d[@"host"] enabled:on];
+            [tv reloadSections:[NSIndexSet indexSetWithIndex:1]
+              withRowAnimation:UITableViewRowAnimationNone];
+        }
         return;
     }
-    if (ip.section == 2 && ip.row == 1) {
+    if (ip.section == 2 && ip.row == 1 && [BSPCdnPool multiHostMode]) {
+        /* 多 host 模式 row 1 = 「全部启用」；单 host 模式 row 1 = 说明行，无动作 */
         [[BSPProxyServer shared] enableAllHosts];
         [self reloadRows];
     }
