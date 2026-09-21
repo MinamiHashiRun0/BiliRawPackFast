@@ -1212,8 +1212,6 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     dispatch_group_t g = dispatch_group_create();
     __block int64_t total = 0;
     __block NSInteger okCount = 0;
-    __block NSInteger finished = 0;
-    NSInteger n = (NSInteger)jobs.count;
 
     for (NSArray *j in jobs) {
         dispatch_group_enter(g);
@@ -1223,7 +1221,6 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             @synchronized (g) {
                 total += b;
                 if (ok) okCount++;
-                finished++;
             }
             dispatch_group_leave(g);
         }];
@@ -1235,7 +1232,6 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
         @synchronized (g) { bytes = total; oks = okCount; }
         finish(secs, bytes, oks);
     });
-    (void)n;
 }
 
 - (void)runBenchmark

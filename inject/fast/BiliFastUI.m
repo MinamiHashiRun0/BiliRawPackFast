@@ -274,6 +274,8 @@ static UIViewController *FTopViewController(void)
         if (key) break;
     }
     if (!key) {
+        /* 兜底：没有任何窗口报告自己是 key（启动早期常见）。
+         * 不用 UIApplication.keyWindow —— iOS 13 起它对多场景应用已废弃且语义不对。 */
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
             if (![s isKindOfClass:[UIWindowScene class]]) continue;
             for (UIWindow *w in ((UIWindowScene *)s).windows) {
@@ -282,7 +284,6 @@ static UIViewController *FTopViewController(void)
             if (key) break;
         }
     }
-    if (!key) key = UIApplication.sharedApplication.keyWindow;
     if (!key) return nil;
 
     UIViewController *vc = key.rootViewController;
