@@ -264,22 +264,22 @@ jobs:
           set -euxo pipefail
           mkdir -p dist-fast/Frameworks
           cp "$FAST_DYLIB" dist-fast/Frameworks/BiliFast.dylib
-          cat > dist-fast/README.txt <<'EOF'
-BiliFast —— 哔哩哔哩官方客户端「多 CDN 并发加速」模块
-
-安装：把 Frameworks/BiliFast.dylib 导入签名工具的插件注入列表，
-      或用已注入好的 IPA。不要同时用两种方式（会加载两次）。
-
-使用：正常看视频即可，不需要任何操作。
-      日志与报告在「文件」App → 我的 iPhone → 哔哩哔哩 → BiliFast/
-      其中 report.txt 里的「并发收益」是关键指标：
-        > 1.05  → 并发有效
-        ≤ 1     → 本机网络下单台 CDN 已不是瓶颈，本模块没有收益，建议卸掉
-
-开关（改完重启 App）：
-      BiliFast/mode.txt   写 direct → 完全不改写，退回原样播放
-      BiliFast/hosts.txt  每行一台 CDN，覆盖内置候选池
-EOF
+          {
+            echo "BiliFast —— 哔哩哔哩官方客户端「多 CDN 并发加速」模块"
+            echo ""
+            echo "安装：把 Frameworks/BiliFast.dylib 导入签名工具的插件注入列表，"
+            echo "      或使用已注入好的 IPA。不要同时用两种方式（会加载两次）。"
+            echo ""
+            echo "使用：正常看视频即可，不需要任何操作。"
+            echo "      日志与报告在「文件」App -> 我的 iPhone -> 哔哩哔哩 -> BiliFast/"
+            echo "      report.txt 里的「并发收益」是关键指标："
+            echo "        > 1.05  -> 并发有效"
+            echo "        <= 1    -> 本机网络下单台 CDN 已不是瓶颈，本模块没有收益，建议卸掉"
+            echo ""
+            echo "开关（改完重启 App）："
+            echo "      BiliFast/mode.txt   写 direct -> 完全不改写，退回原样播放"
+            echo "      BiliFast/hosts.txt  每行一台 CDN，覆盖内置候选池"
+          } > dist-fast/README.txt
           cat dist-fast/README.txt
 
       - name: Upload BiliFast dylib
