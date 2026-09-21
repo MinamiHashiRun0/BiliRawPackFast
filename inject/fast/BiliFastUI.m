@@ -368,6 +368,21 @@ static void FBuildWindow(void)
     [gPanel reloadRows];
 }
 
+/* 等 windowScene 就绪再建窗口。
+ * 用普通 C 函数递归调度，不用 __block 块自引用 —— 那在 ARC 下会被判为
+ * 强捕获自身（-Warc-retain-cycles），而且确实会造成循环引用。 */
+static int gBuildTries = 0;
+static void FTryBuildWindow(void)
+{
+    BOOL hasScene = NO;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) { hasScene = YES; break; }
+    }
+    if (hasScene || ++gBuildTries > 20) { FBuildWindow(); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ FTryBuildWindow(); });
+}
+
 void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
 {
     BOOL expected = NO;
@@ -376,24 +391,5 @@ void BiliFastInstallUI(BOOL (^isEnabled)(void), void (^setEnabled)(BOOL))
     gIsEnabled  = [isEnabled copy];
     gSetEnabled = [setEnabled copy];
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            /* 场景没就绪就再等一拍 —— 最多等约 10 秒，之后仍建（至少逻辑上是活的） */
-            __block int tries = 0;
-            __block void (^tryBuild)(void);
-            tryBuild = ^{
-                BOOL hasScene = NO;
-                for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-                    if ([s isKindOfClass:[UIWindowScene class]]) { hasScene = YES; break; }
-                }
-                if (hasScene || ++tries > 20) {
-                    FBuildWindow();
-                    return;
-                }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), tryBuild);
-            };
-            tryBuild();
-        }
-    });
+    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { FTryBuildWindow(); } });
 }
