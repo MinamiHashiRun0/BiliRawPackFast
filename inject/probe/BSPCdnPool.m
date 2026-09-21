@@ -45,9 +45,9 @@ static BOOL gMediaCheckDisabled = NO;
             @"upos-tf-all-ali.bilivideo.com",
             @"cn-hk-eq-bcache-01.bilivideo.com",
             @"cn-hk-eq-bcache-02.bilivideo.com",
-            @"upos-sz-mirrorali.bilivideo.cn",
-            @"upos-sz-mirrorcos.bilivideo.cn",
-            @"upos-sz-mirrorhw.bilivideo.cn",
+            /* 注意：这里**没有** .bilivideo.cn 域名。
+             * 真机实测 upos-sz-mirrorali.bilivideo.cn 直接返回 403 ——
+             * 签名不跨 .cn/.com 域，放进来只会白白浪费一次重试。 */
         ];
     });
     return a;

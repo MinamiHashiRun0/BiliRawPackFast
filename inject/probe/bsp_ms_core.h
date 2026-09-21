@@ -89,6 +89,19 @@ int bsp_ms_pick(const BSPMSPlanner *p, int64_t need_bytes, double now);
  * 用于调用方 sleep。返回 -1 表示没有健康主机。 */
 int bsp_ms_next_ready(const BSPMSPlanner *p, int64_t need_bytes, double now, double *out_wait);
 
+/* 每主机在途分片数上限。
+ *
+ * 为什么需要：真机日志里出现大量「网络连接已中断」—— 调度器学会哪台快之后会把
+ * 十几个分片同时压到同一台 CDN 上，而对端会掐掉过量并发连接。这是**并发数**上限，
+ * 不是带宽上限（带宽上限那套 AIMD 已经证明会自锁成瓶颈，见 BSPProxyServer.m）。
+ * 设为 0 表示不限。 */
+void bsp_ms_set_max_inflight(BSPMSPlanner *p, int n);
+int  bsp_ms_max_inflight(const BSPMSPlanner *p);
+
+/* 与 bsp_ms_pick 相同的选择逻辑，但**优先**返回在途数未达上限的健康主机；
+ * 若所有健康主机都已到上限，则退化为普通 pick（宁可超一点，也不能卡住不派发）。 */
+int bsp_ms_pick_capped(const BSPMSPlanner *p, int64_t need_bytes, double now);
+
 /* 派发一个分片：tok -= bytes，active += 1 */
 void bsp_ms_begin(BSPMSPlanner *p, int idx, int64_t bytes, double now);
 

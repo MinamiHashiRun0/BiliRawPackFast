@@ -25,8 +25,10 @@
  *   验证调大之后有没有真的变快。） */
 static const int64_t  kChunkBytes        = 512 * 1024;   /* 单个上游分片 */
 static const NSInteger kWindow           = 16;            /* 每连接的并发窗口 */
-static const NSInteger kBlacklistErrors  = 3;
-static const double   kFirstChunkTimeout = 4.0;   /* 首片超过这么久就 fail-open 回源 */
+static const NSInteger kBlacklistErrors  = 2;             /* 连续错误到几次拉黑 */
+static const NSInteger kMaxInflightPerHost = 3;           /* 每主机在途分片上限（防连接风暴） */
+static const NSInteger kChunkRetries     = 1;             /* 单个分片最多换几台重试 */
+static const double   kFirstChunkTimeout = 2.5;           /* 首片超过这么久就 fail-open 回源 */
 static const NSUInteger kMaxHeaderBytes  = 32 * 1024;
 static const int      kRecvTimeoutSec    = 15;
 
@@ -118,6 +120,7 @@ static NSSet *kDropReqHeaders(void)
 @property (nonatomic, assign) BOOL firstChunkArrived;
 @property (nonatomic, assign) BOOL schedulePending;
 @property (nonatomic, assign) BOOL headOnly;
+@property (nonatomic, assign) int originHostIdx;      /* URL 自己的 host 在池中的下标 */
 @property (nonatomic, assign) int64_t bytesToClient;
 @property (nonatomic, assign) NSTimeInterval tRequest;   /* 客户端请求到达的时刻 */
 @property (nonatomic, assign) NSTimeInterval tFirst;
@@ -303,6 +306,9 @@ static NSSet *kDropReqHeaders(void)
 
     if (_planner) { bsp_ms_destroy(_planner); _planner = NULL; }
     _planner = bsp_ms_create((int)all.count, kPerHostCapBps, kPerHostCapBps);
+    /* 每主机在途上限：防止调度器学会哪台快之后把十几个分片同时压过去，
+     * 对端会把过量并发连接直接掐断（真机日志里的「网络连接已中断」）。 */
+    bsp_ms_set_max_inflight(_planner, (int)kMaxInflightPerHost);
     for (NSUInteger i = 0; i < all.count; i++)
         bsp_ms_set_host_name(_planner, (int)i, all[i].UTF8String);
 }
@@ -683,7 +689,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     ctx.total     = -1;
 
     origIdx = [self ensureHost:[self hostSpecOf:orig]];
-    (void)origIdx;
+    ctx.originHostIdx = origIdx;
 
     /* 首片 fail-open 定时器 */
     {
@@ -735,14 +741,14 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
     if (!ctx.url || ctx.closed || ctx.failed || ctx.bodyDone) return;
     ctx.schedulePending = NO;
 
-    /* 总长未知时把窗口收到 2。
+    /* 只有「客户端没给结束位置、我们也不知道文件总长」时才收窗口。
      *
-     * 为什么必须收：客户端发的是开放式 Range（bytes=N-），我们不知道文件到哪结束。
-     * 如果照常按 16 个分片预取，512 KiB × 16 = 8 MiB 可能直接冲过文件末尾
-     * —— 上游对越界 Range 返回 416，于是分片失败、整个请求 502。
-     * （真机之前没暴露是因为 256 KiB × 12 = 3 MiB 恰好小于常见剩余量。）
-     * 收到第一片的 Content-Range 就能学到总长，之后窗口自动放开。 */
-    window = (ctx.total < 0) ? 2 : kWindow;
+     * 客户端给了 bytes=N-M 时我们清楚边界，怎么预取都不会越界 —— 那种情况必须
+     * 放开窗口。之前不看 reqEnd 一律收成 2，把绝大多数请求的并发都掐掉了。
+     * 真正需要收敛的只有 bytes=N-（开放式）：512 KiB × 16 = 8 MiB 可能冲过文件末尾，
+     * 上游对越界 Range 返回 416，于是分片失败、整个请求 502。
+     * 第一片的 Content-Range 就能学到总长，之后自动放开。 */
+    window = (ctx.total < 0 && ctx.reqEnd == INT64_MAX) ? 2 : kWindow;
 
     while (ctx.outstanding < window) {
         int64_t s = ctx.nextFetch;
@@ -762,17 +768,27 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
 
         [_lock lock];
         bsp_ms_tick(_planner, now);
-        hostIdx = bsp_ms_pick(_planner, need, now);
+        /* 第一片固定交给 URL 自己的 host。
+         *
+         * 为什么：真机日志里出现过连续三次「首片 4 秒未到 -> fail-open 回源」——
+         * 因为冷启动时调度器对所有候选主机都没有测速数据，只能按顺序试，
+         * 撞上几台不响应/掐连接的节点就把关键路径堵死了。
+         * 而 URL 自己的 host 是签名签发方，实测也是最快的那台（2.28 MiB/s）。
+         * 让关键路径从一台**已知可用**的机器起步，之后再由测速数据决定去向。 */
+        if (s == ctx.reqStart && ctx.originHostIdx >= 0 && bsp_ms_is_healthy(_planner, ctx.originHostIdx))
+            hostIdx = ctx.originHostIdx;
+        else
+            hostIdx = bsp_ms_pick_capped(_planner, need, now);
         if (hostIdx >= 0) wait = bsp_ms_wait_for(_planner, hostIdx, need, now);
         if (hostIdx >= 0 && wait <= 0.0) {
-            ctx.nextFetch = e + 1;
-            ctx.outstanding++;
-            ctx.chunkEnd[@(s)] = @(e);
-            bsp_ms_begin(_planner, hostIdx, need, now);
-            _totalChunks++;
-            hostName = _hosts[(NSUInteger)hostIdx];
-        }
-        [_lock unlock];
+        ctx.nextFetch = e + 1;
+        ctx.outstanding++;
+        ctx.chunkEnd[@(s)] = @(e);
+        bsp_ms_begin(_planner, hostIdx, need, now);
+        _totalChunks++;
+        hostName = _hosts[(NSUInteger)hostIdx];
+    }
+    [_lock unlock];
 
         if (hostIdx < 0) { [self failRequest:ctx reason:@"所有 CDN 节点均不可用"]; return; }
         if (wait > 0.0) {
@@ -784,7 +800,7 @@ static BOOL bsp_write_all(int fd, const void *buf, size_t len)
             }
             return;
         }
-        [self fetchChunk:ctx start:s end:e host:hostName retry:2];
+        [self fetchChunk:ctx start:s end:e host:hostName retry:kChunkRetries];
     }
 
     if (ctx.outstanding == 0 &&

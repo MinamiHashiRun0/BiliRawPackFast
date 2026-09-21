@@ -243,6 +243,50 @@ static void t_distribution(void)
     bsp_ms_destroy(p);
 }
 
+/* ---------------- 5b. 每主机在途上限 ---------------- */
+static void t_inflight_cap(void)
+{
+    BSPMSPlanner *p;
+    const int64_t CHUNK = 262144;
+
+    printf("[5b] 每主机在途上限\n");
+    p = bsp_ms_create(4, 0, 0);          /* 不限速，纯看分数与在途数 */
+
+    /* 不设上限时，12 个在途会被 load_factor 摊到 4 台各 3 个（见 [5a]） */
+    CHECK(bsp_ms_max_inflight(p) == 0, "缺省应为不限");
+
+    /* 设成 1：每次派发后该主机就不可再选，于是必然在 4 台之间轮转 */
+    bsp_ms_set_max_inflight(p, 1);
+    {
+        int cnt[4] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; i++) {
+            int h = bsp_ms_pick_capped(p, CHUNK, 0.0);
+            CHECK(h >= 0, "pick_capped 失败");
+            if (h < 0) break;
+            CHECK(bsp_ms_active(p, h) == 0, "选到了一台已经有在途的主机 h=%d", h);
+            bsp_ms_begin(p, h, CHUNK, 0.0);
+            cnt[h]++;
+        }
+        printf("     上限=1 时前 4 次派发：%d/%d/%d/%d（期望 1/1/1/1）\n",
+               cnt[0], cnt[1], cnt[2], cnt[3]);
+        CHECK(cnt[0] == 1 && cnt[1] == 1 && cnt[2] == 1 && cnt[3] == 1, "未按上限轮转");
+    }
+
+    /* 全部到上限时不能返回 -1 —— 那会让整个请求停住。
+     * 应当退化为普通 pick，宁可稍微超一点也要继续派发。 */
+    {
+        int h = bsp_ms_pick_capped(p, CHUNK, 0.0);
+        CHECK(h >= 0, "全都在上限上时返回了 -1（会导致请求卡死）");
+    }
+
+    /* 上限设回不限，行为应与 bsp_ms_pick 一致 */
+    bsp_ms_set_max_inflight(p, 0);
+    CHECK(bsp_ms_pick_capped(p, CHUNK, 0.0) == bsp_ms_pick(p, CHUNK, 0.0),
+          "不限上限时 pick_capped 与 pick 结果不一致");
+
+    bsp_ms_destroy(p);
+}
+
 /* ---------------- 6. 令牌桶真的封住了每主机上限 ---------------- */
 static void t_caps_enforced(void)
 {
@@ -448,6 +492,7 @@ int main(void)
     t_health();
     t_plan_bounds();
     t_distribution();
+    t_inflight_cap();
     t_caps_enforced();
     t_single_host_ceiling();
     t_fuzz();

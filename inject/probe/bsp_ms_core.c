@@ -26,6 +26,7 @@ struct BSPMSPlanner {
     int     n;
     double  cap;
     double  burst;
+    int     max_inflight;
     BSPHost h[BSP_MS_MAX_HOSTS];
 };
 
@@ -222,8 +223,48 @@ int bsp_ms_pick(const BSPMSPlanner *p, int64_t need_bytes, double now)
     return best_token;
 }
 
-int bsp_ms_next_ready(const BSPMSPlanner *p, int64_t need_bytes, double now, double *out_wait)
+void bsp_ms_set_max_inflight(BSPMSPlanner *p, int n)
 {
+    if (!p) return;
+    p->max_inflight = n > 0 ? n : 0;
+}
+
+int bsp_ms_max_inflight(const BSPMSPlanner *p)
+{
+    return p ? p->max_inflight : 0;
+}
+
+int bsp_ms_pick_capped(const BSPMSPlanner *p, int64_t need_bytes, double now)
+{
+    int i, best_with_tokens = -1, best_any = -1;
+    double best_with_tokens_score = -1.0, best_any_score = -1.0;
+    int cap;
+
+    if (!p) return -1;
+    cap = p->max_inflight;
+    if (cap <= 0) return bsp_ms_pick(p, need_bytes, now);
+
+    for (i = 0; i < p->n; i++) {
+        double tok, sc;
+        if (!p->h[i].healthy) continue;
+        if (p->h[i].active >= cap) continue;          /* 已经在途满额，先排除 */
+        tok = bsp_tokens_at(p, i, now);
+        sc  = bsp_ms_score(p, i);
+        if (sc > best_any_score) { best_any_score = sc; best_any = i; }
+        if (tok >= (double)need_bytes && sc > best_with_tokens_score) {
+            best_with_tokens_score = sc;
+            best_with_tokens = i;
+        }
+    }
+
+    if (best_with_tokens >= 0) return best_with_tokens;
+    if (best_any >= 0) return best_any;
+    /* 所有健康主机都到上限了：退化为普通 pick。
+     * 宁可稍微超出并发上限，也不能因为"都在忙"就不派发 —— 那会让整个请求停住。 */
+    return bsp_ms_pick(p, need_bytes, now);
+}
+
+int bsp_ms_next_ready(const BSPMSPlanner *p, int64_t need_bytes, double now, double *out_wait){
     int i, best = -1;
     double best_wait = -1.0;
     if (!p) return -1;
